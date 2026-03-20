@@ -19,7 +19,7 @@ volatile int* PS2_ptr = (int*)PS2_BASE;
 
 int pixel_buffer_start;
 
-/* Keyboard state */
+// Keyboard state 
 bool key_w = false;
 bool key_s = false;
 bool key_a = false;
@@ -28,21 +28,21 @@ bool key_r = false;
 
 bool break_code = false;
 
-/* Car state */
+// Car state 
 float car_x = 160.0f;
 float car_y = 120.0f;
-float car_angle = 1.5708f;  // facing up
+float car_angle = 1.5708f;  
 float car_speed = 0.0f;
 
-/* Physics */
-const float accel_forward = 0.15f;
-const float accel_reverse = 0.10f;
-const float friction = 0.97f;
-const float max_forward = 3.0f;
-const float max_reverse = -1.5f;
-const float turn_speed = 0.06f;
+// Physics 
+const float accel_forward = 0.08f;
+const float accel_reverse = 0.05f;
+const float friction = 0.94f;
+const float max_forward = 1.5f;
+const float max_reverse = -0.8f;
+const float turn_speed = 0.04f;
 
-/* Function prototypes */
+// Function prototypes 
 void wait_for_vsync(void);
 void plot_pixel(int x, int y, short int color);
 void clear_screen(void);
@@ -54,6 +54,7 @@ void handle_keyboard_byte(unsigned char byte);
 void update_key_state(unsigned char scan, bool pressed);
 void reset_car(void);
 
+// Main game loop
 int main(void) {
   pixel_buffer_start = *pixel_ctrl_ptr;
 
@@ -99,6 +100,7 @@ int main(void) {
   return 0;
 }
 
+// Reset the car to the center of the screen with default angle and speed
 void reset_car(void) {
   car_x = 160.0f;
   car_y = 120.0f;
@@ -106,18 +108,22 @@ void reset_car(void) {
   car_speed = 0.0f;
 }
 
+// Process keyboard input from PS/2 controller
 void process_keyboard_ps2(void) {
   int data;
 
+  // Read all available bytes from the PS/2 controller
   while (1) {
     data = *PS2_ptr;
     if ((data & 0x8000) == 0) break;
 
+    // Extract the byte and handle it
     unsigned char byte = (unsigned char)(data & 0xFF);
     handle_keyboard_byte(byte);
   }
 }
 
+// Handle a single byte from the PS/2 controller
 void handle_keyboard_byte(unsigned char byte) {
   if (byte == 0xF0) {
     break_code = true;
@@ -128,34 +134,38 @@ void handle_keyboard_byte(unsigned char byte) {
   break_code = false;
 }
 
+
+// Update key state 
 void update_key_state(unsigned char scan, bool pressed) {
   switch (scan) {
     case 0x1D:
-      key_w = pressed;
+      key_w = pressed; // W key
       break;
     case 0x1B:
-      key_s = pressed;
+      key_s = pressed; // S key
       break;
     case 0x1C:
-      key_a = pressed;
+      key_a = pressed; // A key
       break;
     case 0x23:
-      key_d = pressed;
+      key_d = pressed; // D key
       break;
     case 0x2D:
-      key_r = pressed;
+      key_r = pressed; // R key
       break;
     default:
       break;
   }
 }
 
+// Wait for vertical sync and update pixel buffer start address
 void wait_for_vsync(void) {
   *pixel_ctrl_ptr = 1;
   while ((*(pixel_ctrl_ptr + 3) & 0x01) != 0);
   pixel_buffer_start = *pixel_ctrl_ptr;
 }
 
+// Plot a pixel at (x, y) with the specified color
 void plot_pixel(int x, int y, short int color) {
   if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return;
 
@@ -165,6 +175,7 @@ void plot_pixel(int x, int y, short int color) {
   *addr = color;
 }
 
+// Clear the entire screen by plotting black pixels
 void clear_screen(void) {
   for (int y = 0; y < SCREEN_H; y++) {
     for (int x = 0; x < SCREEN_W; x++) {
@@ -173,6 +184,7 @@ void clear_screen(void) {
   }
 }
 
+// Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm
 void draw_line(int x0, int y0, int x1, int y1, short int color) {
   int is_steep = (abs(y1 - y0) > abs(x1 - x0));
 
@@ -216,6 +228,7 @@ void draw_line(int x0, int y0, int x1, int y1, short int color) {
   }
 }
 
+// Draw the car as a rectangle with a line indicating direction
 void draw_car(float x, float y, float angle) {
   int cx = (int)x;
   int cy = (int)y;
@@ -233,6 +246,7 @@ void draw_car(float x, float y, float angle) {
   plot_pixel(cx, cy, YELLOW);
 }
 
+// Erase the car by drawing a black rectangle and line over its previous position
 void erase_car(float x, float y, float angle) {
   int cx = (int)x;
   int cy = (int)y;
