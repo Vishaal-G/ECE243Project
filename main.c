@@ -68,6 +68,7 @@ int main(void) {
 
     process_keyboard_ps2();
 
+	// Update car physics based on input
     if (key_a) car_angle += turn_speed;
     if (key_d) car_angle -= turn_speed;
 
@@ -79,6 +80,7 @@ int main(void) {
 
     car_speed *= friction;
 
+	// Reset car
     if (key_r) {
       reset_car();
     } else {
