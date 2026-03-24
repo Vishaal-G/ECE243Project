@@ -18,6 +18,7 @@
 #define CAR_WIDTH 20.0f
 #define CAR_LENGTH 30.0f
 #define CAR_COLLISION_RADIUS 12.0f
+#define CAR_TO_CAR_RADIUS 16.0f
 
 #define PI 3.14159265f
 
@@ -47,6 +48,14 @@ typedef struct {
   float speed;
 } Player;
 
+typedef struct {
+  float x;
+  float y;
+  float angle;
+  float speed;
+  bool active;
+} PoliceCar;
+
 volatile int* pixel_ctrl_ptr = (int*)PIXEL_BUF_CTRL_BASE;
 volatile int* PS2_ptr = (int*)PS2_BASE;
 
@@ -57,6 +66,7 @@ short int Buffer2[240][512];
 static TileType world_map[MAP_ROWS][MAP_COLS];
 
 static Player player;
+static PoliceCar police_car;
 static float camera_x = 0.0f;
 static float camera_y = 0.0f;
 
@@ -79,6 +89,10 @@ static const float brake_drag = 0.88f;
 static const float max_forward_speed = 7.5f;
 static const float max_reverse_speed = -3.6f;
 static const float turn_rate = 0.050f;
+static const float police_accel = 0.22f;
+static const float police_drag = 0.97f;
+static const float police_max_speed = 5.0f;
+static const float police_turn_rate = 0.090f;
 
 void init_buffers(void);
 void wait_for_vsync(void);
@@ -99,6 +113,7 @@ void add_road_col(int col);
 void place_buildings(void);
 
 void reset_player(void);
+void spawn_police_car(void);
 void process_keyboard_ps2(void);
 void handle_keyboard_byte(unsigned char byte);
 void update_key_state(unsigned char scan, bool pressed);
@@ -106,13 +121,19 @@ void update_key_state(unsigned char scan, bool pressed);
 bool is_blocking_tile(int col, int row);
 TileType get_tile_at_world(float world_x, float world_y);
 bool check_collision(float next_x, float next_y);
+bool is_road_tile(int col, int row);
+bool check_player_police_collision(void);
 
 void update_player(void);
+void update_police_car(void);
 void update_camera(void);
 
 void draw_world(void);
 void draw_tile(int col, int row, int screen_x, int screen_y);
 void draw_player(void);
+void draw_police_car(void);
+void draw_filled_car(float world_x, float world_y, float angle, short int body_color,
+                     short int nose_color);
 
 int clamp_int(int value, int min_value, int max_value);
 float clamp_float(float value, float min_value, float max_value);
@@ -124,6 +145,7 @@ int main(void) {
   seed_rng(0x24324324u);
   generate_map();
   reset_player();
+  spawn_police_car();
   update_camera();
 
   while (1) {
@@ -131,8 +153,11 @@ int main(void) {
 
     if (key_r) {
       reset_player();
+      spawn_police_car();
     } else {
       update_player();
+      update_police_car();
+      check_player_police_collision();
     }
 
     update_camera();
@@ -377,6 +402,51 @@ void reset_player(void) {
   player.speed = 0.0f;
 }
 
+void spawn_police_car(void) {
+  int attempts;
+  int col;
+  int row;
+  float spawn_x;
+  float spawn_y;
+  float dx;
+  float dy;
+
+  police_car.active = false;
+  police_car.speed = 0.0f;
+  police_car.angle = PI / 2.0f;
+
+  for (attempts = 0; attempts < 256; attempts++) {
+    col = rand_range(1, MAP_COLS - 2);
+    row = rand_range(1, MAP_ROWS - 2);
+
+    if (!is_road_tile(col, row)) {
+      continue;
+    }
+
+    spawn_x = (col + 0.5f) * TILE_SIZE;
+    spawn_y = (row + 0.5f) * TILE_SIZE;
+    dx = spawn_x - player.x;
+    dy = spawn_y - player.y;
+
+    if (dx * dx + dy * dy < 260.0f * 260.0f) {
+      continue;
+    }
+
+    police_car.x = spawn_x;
+    police_car.y = spawn_y;
+    police_car.angle = atan2f(-(player.y - police_car.y), player.x - police_car.x);
+    police_car.speed = 0.0f;
+    police_car.active = true;
+    return;
+  }
+
+  police_car.x = (MAP_COLS - 3.0f) * TILE_SIZE;
+  police_car.y = (MAP_ROWS - 3.0f) * TILE_SIZE;
+  police_car.angle = PI;
+  police_car.speed = 0.0f;
+  police_car.active = true;
+}
+
 void process_keyboard_ps2(void) {
   int data;
 
@@ -439,6 +509,14 @@ bool is_blocking_tile(int col, int row) {
   return world_map[row][col] == TILE_BUILDING || world_map[row][col] == TILE_BORDER;
 }
 
+bool is_road_tile(int col, int row) {
+  if (col < 0 || row < 0 || col >= MAP_COLS || row >= MAP_ROWS) {
+    return false;
+  }
+
+  return world_map[row][col] == TILE_ROAD;
+}
+
 TileType get_tile_at_world(float world_x, float world_y) {
   int col = (int)(world_x / TILE_SIZE);
   int row = (int)(world_y / TILE_SIZE);
@@ -467,6 +545,77 @@ bool check_collision(float next_x, float next_y) {
   }
 
   return false;
+}
+
+bool check_player_police_collision(void) {
+  float dx;
+  float dy;
+  float distance_sq;
+  float min_distance;
+  float distance;
+  float nx;
+  float ny;
+  float overlap;
+
+  if (!police_car.active) {
+    return false;
+  }
+
+  dx = player.x - police_car.x;
+  dy = player.y - police_car.y;
+  min_distance = CAR_TO_CAR_RADIUS * 2.0f;
+  distance_sq = dx * dx + dy * dy;
+
+  if (distance_sq >= min_distance * min_distance) {
+    return false;
+  }
+
+  distance = sqrtf(distance_sq);
+  if (distance < 0.001f) {
+    nx = 1.0f;
+    ny = 0.0f;
+    overlap = min_distance;
+  } else {
+    nx = dx / distance;
+    ny = dy / distance;
+    overlap = min_distance - distance;
+  }
+
+  player.x += nx * (overlap * 0.6f);
+  player.y += ny * (overlap * 0.6f);
+  police_car.x -= nx * (overlap * 0.6f);
+  police_car.y -= ny * (overlap * 0.6f);
+
+  player.speed *= -0.35f;
+  police_car.speed *= -0.20f;
+
+  if (check_collision(player.x, player.y)) {
+    player.x -= nx * overlap;
+    player.y -= ny * overlap;
+    player.speed = 0.0f;
+  }
+
+  if (check_collision(police_car.x, police_car.y)) {
+    police_car.x += nx * overlap;
+    police_car.y += ny * overlap;
+    police_car.speed = 0.0f;
+  }
+
+  dx = player.x - police_car.x;
+  dy = player.y - police_car.y;
+  distance_sq = dx * dx + dy * dy;
+  if (distance_sq < min_distance * min_distance && distance_sq > 0.001f) {
+    distance = sqrtf(distance_sq);
+    nx = dx / distance;
+    ny = dy / distance;
+    overlap = min_distance - distance;
+    player.x += nx * (overlap * 0.5f);
+    player.y += ny * (overlap * 0.5f);
+    police_car.x -= nx * (overlap * 0.5f);
+    police_car.y -= ny * (overlap * 0.5f);
+  }
+
+  return true;
 }
 
 void update_player(void) {
@@ -539,6 +688,68 @@ void update_player(void) {
   }
 }
 
+void update_police_car(void) {
+  float target_angle;
+  float angle_diff;
+  float next_x;
+  float next_y;
+
+  if (!police_car.active) {
+    return;
+  }
+
+  target_angle = atan2f(-(player.y - police_car.y), player.x - police_car.x);
+  angle_diff = target_angle - police_car.angle;
+
+  while (angle_diff > PI) {
+    angle_diff -= 2.0f * PI;
+  }
+  while (angle_diff < -PI) {
+    angle_diff += 2.0f * PI;
+  }
+
+  if (angle_diff > police_turn_rate) {
+    angle_diff = police_turn_rate;
+  } else if (angle_diff < -police_turn_rate) {
+    angle_diff = -police_turn_rate;
+  }
+
+  police_car.angle += angle_diff;
+
+  if (police_car.angle > 2.0f * PI) {
+    police_car.angle -= 2.0f * PI;
+  } else if (police_car.angle < 0.0f) {
+    police_car.angle += 2.0f * PI;
+  }
+
+  police_car.speed += police_accel;
+  if (police_car.speed > police_max_speed) {
+    police_car.speed = police_max_speed;
+  }
+  police_car.speed *= police_drag;
+
+  next_x = police_car.x + cosf(police_car.angle) * police_car.speed;
+  next_y = police_car.y - sinf(police_car.angle) * police_car.speed;
+
+  if (!check_collision(next_x, police_car.y)) {
+    police_car.x = next_x;
+  } else {
+    police_car.angle += PI * 0.35f;
+    police_car.speed *= 0.5f;
+  }
+
+  if (!check_collision(police_car.x, next_y)) {
+    police_car.y = next_y;
+  } else {
+    police_car.angle -= PI * 0.25f;
+    police_car.speed *= 0.5f;
+  }
+
+  if (check_player_police_collision()) {
+    police_car.angle = atan2f(-(player.y - police_car.y), player.x - police_car.x);
+  }
+}
+
 void update_camera(void) {
   camera_x = player.x - (SCREEN_W / 2.0f);
   camera_y = player.y - (SCREEN_H / 2.0f);
@@ -569,6 +780,7 @@ void draw_world(void) {
     }
   }
 
+  draw_police_car();
   draw_player();
 }
 
@@ -605,29 +817,40 @@ void draw_tile(int col, int row, int screen_x, int screen_y) {
 }
 
 void draw_player(void) {
-  int cx = world_to_screen_x(player.x);
-  int cy = world_to_screen_y(player.y);
-  float forward_x = cosf(player.angle);
-  float forward_y = -sinf(player.angle);
+  draw_filled_car(player.x, player.y, player.angle, WHITE, RED);
+}
+
+void draw_police_car(void) {
+  if (!police_car.active) {
+    return;
+  }
+
+  draw_filled_car(police_car.x, police_car.y, police_car.angle, BLUE, RED);
+}
+
+void draw_filled_car(float world_x, float world_y, float angle, short int body_color,
+                     short int nose_color) {
+  int cx = world_to_screen_x(world_x);
+  int cy = world_to_screen_y(world_y);
+  float forward_x = cosf(angle);
+  float forward_y = -sinf(angle);
   float right_x = -forward_y;
   float right_y = forward_x;
+  int half_length = (int)(CAR_LENGTH * 0.5f);
+  int half_width = (int)(CAR_WIDTH * 0.5f);
+  int along;
+  int across;
 
-  int nose_x = cx + (int)(forward_x * (CAR_LENGTH * 0.6f));
-  int nose_y = cy + (int)(forward_y * (CAR_LENGTH * 0.6f));
-  int tail_x = cx - (int)(forward_x * (CAR_LENGTH * 0.4f));
-  int tail_y = cy - (int)(forward_y * (CAR_LENGTH * 0.4f));
-  int left_x = cx + (int)(right_x * (CAR_WIDTH * 0.5f));
-  int left_y = cy + (int)(right_y * (CAR_WIDTH * 0.5f));
-  int right_xi = cx - (int)(right_x * (CAR_WIDTH * 0.5f));
-  int right_yi = cy - (int)(right_y * (CAR_WIDTH * 0.5f));
+  for (along = -half_length; along <= half_length; along++) {
+    for (across = -half_width; across <= half_width; across++) {
+      int px = cx + (int)(forward_x * (float)along + right_x * (float)across);
+      int py = cy + (int)(forward_y * (float)along + right_y * (float)across);
+      plot_pixel(px, py, body_color);
+    }
+  }
 
-  draw_line(left_x, left_y, nose_x, nose_y, WHITE);
-  draw_line(right_xi, right_yi, nose_x, nose_y, WHITE);
-  draw_line(left_x, left_y, tail_x, tail_y, WHITE);
-  draw_line(right_xi, right_yi, tail_x, tail_y, WHITE);
-  draw_line(tail_x, tail_y, nose_x, nose_y, RED);
-
-  draw_rect(cx - 1, cy - 1, 3, 3, YELLOW);
+  draw_line(cx, cy, cx + (int)(forward_x * (CAR_LENGTH * 0.7f)),
+            cy + (int)(forward_y * (CAR_LENGTH * 0.7f)), nose_color);
 }
 
 int clamp_int(int value, int min_value, int max_value) {
