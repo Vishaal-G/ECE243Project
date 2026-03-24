@@ -5,7 +5,6 @@
 
 #define PIXEL_BUF_CTRL_BASE 0xFF203020
 #define PS2_BASE 0xFF200100
-#define HEX_DISPLAY_BASE 0xFF200020
 
 #define SCREEN_W 320
 #define SCREEN_H 240
@@ -59,7 +58,6 @@ typedef struct {
 
 volatile int* pixel_ctrl_ptr = (int*)PIXEL_BUF_CTRL_BASE;
 volatile int* PS2_ptr = (int*)PS2_BASE;
-volatile int* hex_ptr = (int*)HEX_DISPLAY_BASE;
 
 volatile int pixel_buffer_start;
 short int Buffer1[240][512];
@@ -80,8 +78,6 @@ static bool key_r = false;
 static bool break_code = false;
 static bool extended_code = false;
 
-static unsigned int key_press_count = 0;
-
 static unsigned int rng_state = 0x12345678u;
 
 static const float accel_forward = 0.42f;
@@ -93,9 +89,9 @@ static const float brake_drag = 0.88f;
 static const float max_forward_speed = 7.5f;
 static const float max_reverse_speed = -3.6f;
 static const float turn_rate = 0.050f;
-static const float police_accel = 0.22f;
+static const float police_accel = 0.35f;
 static const float police_drag = 0.97f;
-static const float police_max_speed = 5.0f;
+static const float police_max_speed = 7.5f;
 static const float police_turn_rate = 0.090f;
 
 void init_buffers(void);
@@ -106,9 +102,6 @@ void plot_pixel(int x, int y, short int color);
 void clear_screen(short int color);
 void draw_rect(int x, int y, int width, int height, short int color);
 void draw_line(int x0, int y0, int x1, int y1, short int color);
-
-void display_hex_digit(unsigned int digit_index, unsigned int value);
-void display_hex_value(unsigned int value);
 
 void seed_rng(unsigned int seed);
 unsigned int rand_u32(void);
@@ -149,7 +142,6 @@ int world_to_screen_y(float world_y);
 
 int main(void) {
   init_buffers();
-  display_hex_value(0x000000);
   seed_rng(0x24324324u);
   generate_map();
   reset_player();
@@ -280,18 +272,6 @@ void draw_line(int x0, int y0, int x1, int y1, short int color) {
       error -= dx;
     }
   }
-}
-
-void display_hex_digit(unsigned int digit_index, unsigned int value) {
-  unsigned int current_value = *hex_ptr;
-  unsigned int mask = 0xF << (digit_index * 4);
-  value &= 0xF;
-  current_value = (current_value & ~mask) | (value << (digit_index * 4));
-  *hex_ptr = current_value;
-}
-
-void display_hex_value(unsigned int value) {
-  *hex_ptr = value & 0xFFFFFF;
 }
 
 void seed_rng(unsigned int seed) {
@@ -518,11 +498,6 @@ void update_key_state(unsigned char scan, bool pressed) {
       break;
     default:
       break;
-  }
-
-  if (pressed) {
-    key_press_count++;
-    display_hex_value(key_press_count);
   }
 }
 
@@ -868,8 +843,10 @@ void draw_filled_car(float world_x, float world_y, float angle, short int body_c
 
   for (along = -half_length; along <= half_length; along++) {
     for (across = -half_width; across <= half_width; across++) {
-      int px = cx + (int)(forward_x * (float)along + right_x * (float)across);
-      int py = cy + (int)(forward_y * (float)along + right_y * (float)across);
+      float px_float = forward_x * (float)along + right_x * (float)across;
+      float py_float = forward_y * (float)along + right_y * (float)across;
+      int px = cx + (int)(px_float + 0.5f);
+      int py = cy + (int)(py_float + 0.5f);
       plot_pixel(px, py, body_color);
     }
   }
