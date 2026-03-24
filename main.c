@@ -249,7 +249,9 @@ void draw_line(int x0, int y0, int x1, int y1, short int color) {
   }
 }
 
-void seed_rng(unsigned int seed) { rng_state = seed; }
+void seed_rng(unsigned int seed) {
+  rng_state = seed;
+}
 
 unsigned int rand_u32(void) {
   rng_state = rng_state * 1664525u + 1013904223u;
@@ -434,8 +436,7 @@ bool is_blocking_tile(int col, int row) {
     return true;
   }
 
-  return world_map[row][col] == TILE_BUILDING ||
-         world_map[row][col] == TILE_BORDER;
+  return world_map[row][col] == TILE_BUILDING || world_map[row][col] == TILE_BORDER;
 }
 
 TileType get_tile_at_world(float world_x, float world_y) {
@@ -472,9 +473,7 @@ void update_player(void) {
   float old_x = player.x;
   float old_y = player.y;
   float old_speed = player.speed;
-  float traction = (get_tile_at_world(player.x, player.y) == TILE_GRASS)
-                       ? grass_drag
-                       : road_drag;
+  float traction = (get_tile_at_world(player.x, player.y) == TILE_GRASS) ? grass_drag : road_drag;
   float dx;
   float dy;
   float next_x;
@@ -514,8 +513,7 @@ void update_player(void) {
   }
 
   player.speed *= traction;
-  player.speed =
-      clamp_float(player.speed, max_reverse_speed, max_forward_speed);
+  player.speed = clamp_float(player.speed, max_reverse_speed, max_forward_speed);
 
   dx = cosf(player.angle) * player.speed;
   dy = -sinf(player.angle) * player.speed;
@@ -592,11 +590,9 @@ void draw_tile(int col, int row, int screen_x, int screen_y) {
 
   if (tile == TILE_ROAD) {
     if ((row % 2) == 0) {
-      draw_rect(screen_x + TILE_SIZE / 2 - 1, screen_y + 4, 2, TILE_SIZE - 8,
-                YELLOW);
+      draw_rect(screen_x + TILE_SIZE / 2 - 1, screen_y + 4, 2, TILE_SIZE - 8, YELLOW);
     } else {
-      draw_rect(screen_x + 4, screen_y + TILE_SIZE / 2 - 1, TILE_SIZE - 8, 2,
-                YELLOW);
+      draw_rect(screen_x + 4, screen_y + TILE_SIZE / 2 - 1, TILE_SIZE - 8, 2, YELLOW);
     }
   } else if (tile == TILE_BUILDING) {
     draw_rect(screen_x + 3, screen_y + 3, TILE_SIZE - 6, TILE_SIZE - 6, RED);
@@ -654,6 +650,10 @@ float clamp_float(float value, float min_value, float max_value) {
   return value;
 }
 
-int world_to_screen_x(float world_x) { return (int)(world_x - camera_x); }
+int world_to_screen_x(float world_x) {
+  return (int)(world_x - camera_x);
+}
 
-int world_to_screen_y(float world_y) { return (int)(world_y - camera_y); }
+int world_to_screen_y(float world_y) {
+  return (int)(world_y - camera_y);
+}
