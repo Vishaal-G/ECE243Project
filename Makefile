@@ -9,22 +9,18 @@ SHELL	:= cmd.exe
 # DE1-SoC
 JTAG_INDEX_SoC	:= 2
 
-# The following variables are set based on the value of the INSTALL variable
+# Toolchain paths
 COMPILER		:= $(INSTALL)/fpgacademy/AMP/cygwin64/home/compiler/bin
 BASH			:= $(INSTALL)/fpgacademy/AMP/cygwin64/bin/bash --noprofile -norc -c 
 HW_DE1-SoC		:= "$(INSTALL)/fpgacademy/Computer_Systems/DE1-SoC/DE1-SoC_Computer/niosVg/DE1_SoC_Computer.sof"
 HW_DE10-Lite	:= "$(INSTALL)/fpgacademy/Computer_Systems/DE10-Lite/DE10-Lite_Computer/niosVg/DE10_Lite_Computer.sof"
 
-# for Quartus programmer (two possibilities exist for the path)
+# PATH setup
 export PATH := $(INSTALL)/quartus/bin64/:$(PATH)
 export PATH := $(INSTALL)/qprogrammer/quartus/bin64/:$(PATH)
-# for GDB server
 export PATH := $(INSTALL)/riscfree/debugger/gdbserver-riscv/:$(PATH)
-# for GDB client
 export PATH := $(INSTALL)/riscfree/toolchain/riscv32-unknown-elf/bin/:$(PATH)
-# for the nios2-terminal
 export PATH := $(INSTALL)/fpgacademy/AMP/bin/:$(PATH)
-# for checking JTAG chain
 export PATH := $(INSTALL)/quartus/sopc_builder/bin/:$(PATH)
 
 CYGWIN_INSTALL := $(shell $(BASH) 'export PATH=/usr/local/bin:/usr/bin; cygpath $(INSTALL)')
@@ -39,7 +35,6 @@ RM	:= /usr/bin/rm -f
 
 # Flags
 USERCCFLAGS	:= -g -O1 -ffunction-sections -fverbose-asm -fno-inline -gdwarf-2 
-# NOTE: -lm removed from here and moved after $(OBJS) in the link command below
 USERLDFLAGS := -Wl,--defsym=__stack_pointer$$=0x4000000 -Wl,--defsym=JTAG_UART_BASE=0xff201000
 ARCHCCFLAGS	:= -march=rv32im_zicsr -mabi=ilp32
 ARCHLDFLAGS	:= -march=rv32im_zicsr -mabi=ilp32
@@ -50,36 +45,7 @@ LDFLAGS		:= $(USERLDFLAGS) $(ARCHLDFLAGS)
 OBJS		:= $(patsubst %, %.o, $(SRCS))
 
 ############################################
-# GDB Macros
-
-# Programs
-GDB_SERVER		:= ash-riscv-gdb-server.exe
-GDB_CLIENT		:= riscv32-unknown-elf-gdb.exe
-
-############################################
-# System Macros
-
-# Programs
-QP_PROGRAMMER	:= quartus_pgm.exe
-
-# Flags
-# DE10-Lite
-SYS_FLAG_CABLE_Lite		:= -c "USB-Blaster [USB-0]"
-# SYS_FLAG_USB_Lite		:= "USB-0"
-# DE1-SoC
-SYS_FLAG_CABLE_SoC 		:= -c "DE-SoC [USB-1]"
-# SYS_FLAG_USB_SoC		:= "USB-1"
-
-# DE10-Lite
-JTAG_INDEX_Lite	:= 1
-RED_TEXT		:= @$(BASH) 'printf "\033[31m"'
-GREEN_TEXT		:= @$(BASH) 'printf "\033[32m"'
-CYAN_TEXT		:= @$(BASH) 'printf "\033[36m"'
-YELLOW_TEXT		:= @$(BASH) 'printf "\033[33m"'
-DEF_TEXT		:= @$(BASH) 'printf "\033[0m"'
-
-############################################
-# Compilation Targets
+# Build Targets
 
 COMPILE: $(basename $(MAIN)).elf
 
@@ -91,7 +57,6 @@ $(basename $(MAIN)).elf: $(OBJS)
 	$(DEF_TEXT)
 	@echo $(LDFLAGS) $(OBJS) -lm -o $@
 	@$(BASH) 'printf "\n"'
-	# FIX: -lm must come AFTER $(OBJS) so the linker resolves sinf/cosf references
 	@$(BASH) 'cd "$(CURDIR)"; $(CYGWIN_PATH); $(LD) $(LDFLAGS) $(OBJS) -lm -o $@'
 
 %.c.o: %.c $(HDRS)
@@ -112,17 +77,23 @@ OBJDUMP: $(basename $(MAIN)).elf
 	@$(BASH) 'cd "$(CURDIR)"; $(CYGWIN_PATH); $(OD) -d -S $<'
 
 CLEAN: 
-	$(RED_TEXT)
-	@$(BASH) 'printf "$(RM) "'
-	$(DEF_TEXT)
-	@echo $(basename $(MAIN)).elf $(OBJS)
+	@$(BASH) 'printf "\033[31m"'
+	@echo Removing build files
+	@$(BASH) 'printf "\033[0m"'
 	@$(BASH) 'cd "$(CURDIR)"; $(RM) $(basename $(MAIN)).elf $(OBJS)'
 
 ############################################
 # System Targets
 
+QP_PROGRAMMER	:= quartus_pgm.exe
+
+SYS_FLAG_CABLE_Lite	:= -c "USB-Blaster [USB-0]"
+SYS_FLAG_CABLE_SoC 	:= -c "DE-SoC [USB-1]"
+
+JTAG_INDEX_Lite	:= 1
+
 DETECT_DEVICES:
-	$(QP_PROGRAMMER) $(SYS_FLAG_CABLE) --auto
+	$(QP_PROGRAMMER) $(SYS_FLAG_CABLE_SoC) --auto
 
 DE1-SoC:
 	$(QP_PROGRAMMER) $(SYS_FLAG_CABLE_SoC) -m jtag -o "P;$(HW_DE1-SoC)@$(JTAG_INDEX_SoC)"
@@ -137,12 +108,11 @@ TERMINAL:
 # GDB Targets
 
 GDB_SERVER: 
-	$(GDB_SERVER) --device 02D120DD --gdb-port 2454 --instance 1 --probe-type USB-Blaster-2 --transport-type jtag --auto-detect true
+	ash-riscv-gdb-server.exe --device 02D120DD --gdb-port 2454 --instance 1 --probe-type USB-Blaster-2 --transport-type jtag --auto-detect true
 
 GDB_CLIENT: 
-	$(GDB_CLIENT) -silent -ex "target remote:2454" -ex "set $$mstatus=0" -ex "set $$mtvec=0" -ex "load" -ex "set $$pc=_start" -ex "info reg pc" "$(basename $(MAIN)).elf"
+	riscv32-unknown-elf-gdb.exe -silent -ex "target remote:2454" -ex "set $$mstatus=0" -ex "set $$mtvec=0" -ex "load" -ex "set $$pc=_start" -ex "info reg pc" "$(basename $(MAIN)).elf"
 
 ############################################
-# EXTRAS
 
 .SILENT: SYMBOLS OBJDUMP
