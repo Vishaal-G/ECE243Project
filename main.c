@@ -17,8 +17,9 @@
 
 #define CAR_WIDTH 20.0f
 #define CAR_LENGTH 30.0f
-#define CAR_COLLISION_RADIUS 12.0f
+#define CAR_COLLISION_RADIUS 9.0f
 #define CAR_TO_CAR_RADIUS 16.0f
+#define POLICE_PLAYER_HIT_RADIUS 13.0f
 
 #define PI 3.14159265f
 
@@ -32,7 +33,7 @@
 #define LIGHT_GRAY 0xC618
 #define YELLOW 0xFFE0
 #define BROWN 0x79E0
-#define DARK_GREEN 0x0320
+#define DARK_GREEN 0x3666
 
 typedef enum {
   TILE_GRASS = 0,
@@ -92,7 +93,7 @@ static const float turn_rate = 0.050f;
 static const float police_accel = 0.35f;
 static const float police_drag = 0.97f;
 static const float police_max_speed = 7.5f;
-static const float police_turn_rate = 0.090f;
+static const float police_turn_rate = 0.060f;
 
 void init_buffers(void);
 void wait_for_vsync(void);
@@ -111,6 +112,8 @@ void generate_map(void);
 void add_road_row(int row);
 void add_road_col(int col);
 void place_buildings(void);
+void widen_tight_grass_paths(void);
+void ensure_spawn_area(void);
 
 void reset_player(void);
 void spawn_police_car(void);
@@ -291,8 +294,26 @@ int rand_range(int low, int high) {
 void generate_map(void) {
   int row;
   int col;
-  int main_row;
-  int main_col;
+  int road_rows[12];
+  int road_cols[12];
+  int row_count;
+  int col_count;
+  int next_row;
+  int next_col;
+  int corridor;
+  int start;
+  int end;
+  int branch;
+  int temp;
+  int branch_row;
+  int branch_col;
+  int length;
+  int dir;
+  int carve_col;
+  int carve_row;
+
+  row_count = 0;
+  col_count = 0;
 
   for (row = 0; row < MAP_ROWS; row++) {
     for (col = 0; col < MAP_COLS; col++) {
@@ -304,26 +325,108 @@ void generate_map(void) {
     }
   }
 
-  main_row = MAP_ROWS / 2;
-  main_col = MAP_COLS / 2;
-  add_road_row(main_row);
-  add_road_col(main_col);
+  road_rows[row_count++] = 2;
+  road_cols[col_count++] = 2;
 
-  for (row = 6; row < MAP_ROWS - 6; row += 8) {
-    add_road_row(row + rand_range(-1, 1));
+  next_row = 7 + rand_range(0, 2);
+  while (next_row < MAP_ROWS - 4 && row_count < 9) {
+    road_rows[row_count++] = next_row;
+    next_row += rand_range(6, 8);
   }
 
-  for (col = 6; col < MAP_COLS - 6; col += 8) {
-    add_road_col(col + rand_range(-1, 1));
+  next_col = 7 + rand_range(0, 2);
+  while (next_col < MAP_COLS - 4 && col_count < 9) {
+    road_cols[col_count++] = next_col;
+    next_col += rand_range(6, 8);
+  }
+
+  road_rows[row_count++] = clamp_int(MAP_ROWS / 2 + rand_range(-2, 2), 2, MAP_ROWS - 3);
+  road_cols[col_count++] = clamp_int(MAP_COLS / 2 + rand_range(-2, 2), 2, MAP_COLS - 3);
+
+  for (row = 0; row < row_count; row++) {
+    add_road_row(road_rows[row]);
+    if ((rand_u32() & 3u) == 0u) {
+      add_road_row(road_rows[row] + 1);
+    }
+  }
+
+  for (col = 0; col < col_count; col++) {
+    add_road_col(road_cols[col]);
+    if ((rand_u32() & 3u) == 0u) {
+      add_road_col(road_cols[col] + 1);
+    }
+  }
+
+  for (row = 0; row < row_count - 1; row++) {
+    corridor = rand_range(road_rows[row], road_rows[row + 1]);
+    start = road_cols[rand_range(0, col_count - 1)];
+    end = road_cols[rand_range(0, col_count - 1)];
+    if (start > end) {
+      temp = start;
+      start = end;
+      end = temp;
+    }
+
+    corridor = clamp_int(corridor, 1, MAP_ROWS - 2);
+    for (col = start; col <= end; col++) {
+      world_map[corridor][col] = TILE_ROAD;
+      if ((rand_u32() & 1u) == 0u && corridor + 1 < MAP_ROWS - 1) {
+        world_map[corridor + 1][col] = TILE_ROAD;
+      }
+    }
+  }
+
+  for (col = 0; col < col_count - 1; col++) {
+    corridor = rand_range(road_cols[col], road_cols[col + 1]);
+    start = road_rows[rand_range(0, row_count - 1)];
+    end = road_rows[rand_range(0, row_count - 1)];
+    if (start > end) {
+      temp = start;
+      start = end;
+      end = temp;
+    }
+
+    corridor = clamp_int(corridor, 1, MAP_COLS - 2);
+    for (row = start; row <= end; row++) {
+      world_map[row][corridor] = TILE_ROAD;
+      if ((rand_u32() & 1u) == 0u && corridor + 1 < MAP_COLS - 1) {
+        world_map[row][corridor + 1] = TILE_ROAD;
+      }
+    }
+  }
+
+  for (branch = 0; branch < 14; branch++) {
+    branch_row = rand_range(2, MAP_ROWS - 3);
+    branch_col = rand_range(2, MAP_COLS - 3);
+    length = rand_range(2, 5);
+    dir = ((rand_u32() & 1u) == 0u) ? -1 : 1;
+
+    if (!is_road_tile(branch_col, branch_row)) {
+      continue;
+    }
+
+    if ((rand_u32() & 1u) == 0u) {
+      for (col = 0; col < length; col++) {
+        carve_col = branch_col + dir * col;
+        if (carve_col <= 0 || carve_col >= MAP_COLS - 1) {
+          break;
+        }
+        world_map[branch_row][carve_col] = TILE_ROAD;
+      }
+    } else {
+      for (row = 0; row < length; row++) {
+        carve_row = branch_row + dir * row;
+        if (carve_row <= 0 || carve_row >= MAP_ROWS - 1) {
+          break;
+        }
+        world_map[carve_row][branch_col] = TILE_ROAD;
+      }
+    }
   }
 
   place_buildings();
-
-  for (row = 1; row < 4; row++) {
-    for (col = 1; col < 4; col++) {
-      world_map[row][col] = TILE_ROAD;
-    }
-  }
+  widen_tight_grass_paths();
+  ensure_spawn_area();
 }
 
 void add_road_row(int row) {
@@ -332,9 +435,6 @@ void add_road_row(int row) {
   row = clamp_int(row, 1, MAP_ROWS - 2);
   for (col = 1; col < MAP_COLS - 1; col++) {
     world_map[row][col] = TILE_ROAD;
-    if (row + 1 < MAP_ROWS - 1) {
-      world_map[row + 1][col] = TILE_ROAD;
-    }
   }
 }
 
@@ -344,9 +444,6 @@ void add_road_col(int col) {
   col = clamp_int(col, 1, MAP_COLS - 2);
   for (row = 1; row < MAP_ROWS - 1; row++) {
     world_map[row][col] = TILE_ROAD;
-    if (col + 1 < MAP_COLS - 1) {
-      world_map[row][col + 1] = TILE_ROAD;
-    }
   }
 }
 
@@ -357,26 +454,46 @@ void place_buildings(void) {
   int block_w;
   int r;
   int c;
+  int check_row;
+  int check_col;
   bool can_place;
 
-  for (row = 2; row < MAP_ROWS - 4; row++) {
-    for (col = 2; col < MAP_COLS - 4; col++) {
+  for (row = 2; row < MAP_ROWS - 3; row++) {
+    for (col = 2; col < MAP_COLS - 3; col++) {
       if (world_map[row][col] != TILE_GRASS) {
         continue;
       }
 
-      if ((rand_u32() & 7u) != 0u) {
+      if ((rand_u32() % 100u) >= 48u) {
         continue;
       }
 
-      block_h = rand_range(2, 4);
-      block_w = rand_range(2, 4);
+      block_h = rand_range(1, 2);
+      block_w = rand_range(1, 2);
       can_place = true;
 
-      for (r = row - 1; r <= row + block_h; r++) {
-        for (c = col - 1; c <= col + block_w; c++) {
-          if (r <= 0 || c <= 0 || r >= MAP_ROWS - 1 || c >= MAP_COLS - 1 ||
-              world_map[r][c] != TILE_GRASS) {
+      for (check_row = row - 2; check_row <= row + block_h + 1 && can_place; check_row++) {
+        for (check_col = col - 2; check_col <= col + block_w + 1; check_col++) {
+          if (check_row <= 0 || check_col <= 0 || check_row >= MAP_ROWS - 1 ||
+              check_col >= MAP_COLS - 1) {
+            can_place = false;
+            break;
+          }
+
+          if (world_map[check_row][check_col] == TILE_BUILDING) {
+            can_place = false;
+            break;
+          }
+        }
+      }
+
+      if (!can_place) {
+        continue;
+      }
+
+      for (r = row; r < row + block_h; r++) {
+        for (c = col; c < col + block_w; c++) {
+          if (world_map[r][c] != TILE_GRASS) {
             can_place = false;
           }
         }
@@ -395,10 +512,81 @@ void place_buildings(void) {
   }
 }
 
+void widen_tight_grass_paths(void) {
+  int pass;
+  int row;
+  int col;
+  bool left_blocked;
+  bool right_blocked;
+  bool up_blocked;
+  bool down_blocked;
+  bool vertical_corridor;
+  bool horizontal_corridor;
+  bool touches_road;
+
+  for (pass = 0; pass < 2; pass++) {
+    for (row = 1; row < MAP_ROWS - 1; row++) {
+      for (col = 1; col < MAP_COLS - 1; col++) {
+        if (world_map[row][col] != TILE_GRASS) {
+          continue;
+        }
+
+        left_blocked = is_blocking_tile(col - 1, row);
+        right_blocked = is_blocking_tile(col + 1, row);
+        up_blocked = is_blocking_tile(col, row - 1);
+        down_blocked = is_blocking_tile(col, row + 1);
+        vertical_corridor = !up_blocked && !down_blocked;
+        horizontal_corridor = !left_blocked && !right_blocked;
+        touches_road = is_road_tile(col - 1, row) || is_road_tile(col + 1, row) ||
+                       is_road_tile(col, row - 1) || is_road_tile(col, row + 1);
+
+        if (touches_road && left_blocked && right_blocked && vertical_corridor) {
+          if (world_map[row][col - 1] == TILE_BUILDING) {
+            world_map[row][col - 1] = TILE_GRASS;
+          }
+          if (world_map[row][col + 1] == TILE_BUILDING) {
+            world_map[row][col + 1] = TILE_GRASS;
+          }
+        }
+
+        if (touches_road && up_blocked && down_blocked && horizontal_corridor) {
+          if (world_map[row - 1][col] == TILE_BUILDING) {
+            world_map[row - 1][col] = TILE_GRASS;
+          }
+          if (world_map[row + 1][col] == TILE_BUILDING) {
+            world_map[row + 1][col] = TILE_GRASS;
+          }
+        }
+      }
+    }
+  }
+}
+
+void ensure_spawn_area(void) {
+  int row;
+  int col;
+
+  for (row = 1; row < 5; row++) {
+    for (col = 1; col < 5; col++) {
+      world_map[row][col] = TILE_ROAD;
+    }
+  }
+
+  for (row = 1; row < 7; row++) {
+    world_map[row][2] = TILE_ROAD;
+    world_map[row][3] = TILE_ROAD;
+  }
+
+  for (col = 1; col < 8; col++) {
+    world_map[2][col] = TILE_ROAD;
+    world_map[3][col] = TILE_ROAD;
+  }
+}
+
 void reset_player(void) {
   player.x = 1.5f * TILE_SIZE;
   player.y = 1.5f * TILE_SIZE;
-  player.angle = PI / 2.0f;
+  player.angle = 0.0f;
   player.speed = 0.0f;
 }
 
@@ -563,7 +751,7 @@ bool check_player_police_collision(void) {
 
   dx = player.x - police_car.x;
   dy = player.y - police_car.y;
-  min_distance = CAR_TO_CAR_RADIUS * 2.0f;
+  min_distance = POLICE_PLAYER_HIT_RADIUS * 2.0f;
   distance_sq = dx * dx + dy * dy;
 
   if (distance_sq >= min_distance * min_distance) {
@@ -800,18 +988,12 @@ void draw_tile(int col, int row, int screen_x, int screen_y) {
 
   draw_rect(screen_x, screen_y, TILE_SIZE, TILE_SIZE, fill);
 
-  if (tile == TILE_ROAD) {
-    if ((row % 2) == 0) {
-      draw_rect(screen_x + TILE_SIZE / 2 - 1, screen_y + 4, 2, TILE_SIZE - 8, YELLOW);
-    } else {
-      draw_rect(screen_x + 4, screen_y + TILE_SIZE / 2 - 1, TILE_SIZE - 8, 2, YELLOW);
-    }
-  } else if (tile == TILE_BUILDING) {
-    draw_rect(screen_x + 3, screen_y + 3, TILE_SIZE - 6, TILE_SIZE - 6, RED);
+  if (tile == TILE_BUILDING) {
+    draw_rect(screen_x + 3, screen_y + 3, TILE_SIZE - 6, TILE_SIZE - 6, BLUE);
     draw_rect(screen_x + 8, screen_y + 8, 5, 5, LIGHT_GRAY);
   } else if (tile == TILE_BORDER) {
     draw_rect(screen_x + 4, screen_y + 4, TILE_SIZE - 8, TILE_SIZE - 8, WHITE);
-  } else {
+  } else if (tile == TILE_GRASS) {
     draw_rect(screen_x + 10, screen_y + 10, 4, 4, GREEN);
   }
 }
@@ -882,3 +1064,25 @@ int world_to_screen_x(float world_x) {
 int world_to_screen_y(float world_y) {
   return (int)(world_y - camera_y);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
