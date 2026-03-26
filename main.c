@@ -5,6 +5,8 @@
 
 #define PIXEL_BUF_CTRL_BASE 0xFF203020
 #define PS2_BASE 0xFF200100
+#define HEX3_HEX0_BASE 0xFF200020
+#define HEX5_HEX4_BASE 0xFF200030
 
 #define SCREEN_W 320
 #define SCREEN_H 240
@@ -20,6 +22,7 @@
 #define CAR_COLLISION_RADIUS 9.0f
 #define CAR_TO_CAR_RADIUS 16.0f
 #define POLICE_PLAYER_HIT_RADIUS 13.0f
+#define CASH_PICKUP_RADIUS 18.0f
 
 #define PI 3.14159265f
 
@@ -59,17 +62,21 @@ typedef struct {
 
 volatile int* pixel_ctrl_ptr = (int*)PIXEL_BUF_CTRL_BASE;
 volatile int* PS2_ptr = (int*)PS2_BASE;
+volatile int* HEX3_HEX0_ptr = (int*)HEX3_HEX0_BASE;
+volatile int* HEX5_HEX4_ptr = (int*)HEX5_HEX4_BASE;
 
 volatile int pixel_buffer_start;
 short int Buffer1[240][512];
 short int Buffer2[240][512];
 
 static TileType world_map[MAP_ROWS][MAP_COLS];
+static bool cash_pickups[MAP_ROWS][MAP_COLS];
 
 static Player player;
 static PoliceCar police_car;
 static float camera_x = 0.0f;
 static float camera_y = 0.0f;
+static int score = 0;
 
 static bool key_w = false;
 static bool key_s = false;
@@ -114,6 +121,11 @@ void add_road_col(int col);
 void place_buildings(void);
 void widen_tight_grass_paths(void);
 void ensure_spawn_area(void);
+void reset_cash_pickups(void);
+void collect_cash_pickups(void);
+void update_score_display(void);
+unsigned char encode_hex_digit(int digit);
+bool pickup_can_spawn_at(int col, int row);
 
 void reset_player(void);
 void spawn_police_car(void);
@@ -147,18 +159,22 @@ int main(void) {
   init_buffers();
   seed_rng(0x24324324u);
   generate_map();
+  reset_cash_pickups();
   reset_player();
   spawn_police_car();
   update_camera();
+  update_score_display();
 
   while (1) {
     process_keyboard_ps2();
 
     if (key_r) {
+      reset_cash_pickups();
       reset_player();
       spawn_police_car();
     } else {
       update_player();
+      collect_cash_pickups();
       update_police_car();
       check_player_police_collision();
     }
@@ -583,6 +599,57 @@ void ensure_spawn_area(void) {
   }
 }
 
+void reset_cash_pickups(void) {
+  int row;
+  int col;
+
+  score = 0;
+
+  for (row = 0; row < MAP_ROWS; row++) {
+    for (col = 0; col < MAP_COLS; col++) {
+      cash_pickups[row][col] = false;
+    }
+  }
+
+  for (row = 0; row < MAP_ROWS; row++) {
+    for (col = 0; col < MAP_COLS; col++) {
+      if (pickup_can_spawn_at(col, row) && (rand_u32() % 100u) < 22u) {
+        cash_pickups[row][col] = true;
+      }
+    }
+  }
+
+  cash_pickups[1][1] = false;
+  update_score_display();
+}
+
+bool pickup_can_spawn_at(int col, int row) {
+  int check_row;
+  int check_col;
+
+  if (!is_road_tile(col, row)) {
+    return false;
+  }
+
+  if (row <= 3 && col <= 3) {
+    return false;
+  }
+
+  for (check_row = row - 1; check_row <= row + 1; check_row++) {
+    for (check_col = col - 1; check_col <= col + 1; check_col++) {
+      if (check_row < 0 || check_col < 0 || check_row >= MAP_ROWS || check_col >= MAP_COLS) {
+        continue;
+      }
+
+      if (cash_pickups[check_row][check_col]) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 void reset_player(void) {
   player.x = 1.5f * TILE_SIZE;
   player.y = 1.5f * TILE_SIZE;
@@ -806,6 +873,44 @@ bool check_player_police_collision(void) {
   return true;
 }
 
+void collect_cash_pickups(void) {
+  int min_col = clamp_int((int)((player.x - CASH_PICKUP_RADIUS) / TILE_SIZE), 0, MAP_COLS - 1);
+  int max_col = clamp_int((int)((player.x + CASH_PICKUP_RADIUS) / TILE_SIZE), 0, MAP_COLS - 1);
+  int min_row = clamp_int((int)((player.y - CASH_PICKUP_RADIUS) / TILE_SIZE), 0, MAP_ROWS - 1);
+  int max_row = clamp_int((int)((player.y + CASH_PICKUP_RADIUS) / TILE_SIZE), 0, MAP_ROWS - 1);
+  int row;
+  int col;
+  bool score_changed = false;
+
+  for (row = min_row; row <= max_row; row++) {
+    for (col = min_col; col <= max_col; col++) {
+      float pickup_x;
+      float pickup_y;
+      float dx;
+      float dy;
+
+      if (!cash_pickups[row][col]) {
+        continue;
+      }
+
+      pickup_x = ((float)col + 0.5f) * TILE_SIZE;
+      pickup_y = ((float)row + 0.5f) * TILE_SIZE;
+      dx = player.x - pickup_x;
+      dy = player.y - pickup_y;
+
+      if (dx * dx + dy * dy <= CASH_PICKUP_RADIUS * CASH_PICKUP_RADIUS) {
+        cash_pickups[row][col] = false;
+        score++;
+        score_changed = true;
+      }
+    }
+  }
+
+  if (score_changed) {
+    update_score_display();
+  }
+}
+
 void update_player(void) {
   float old_x = player.x;
   float old_y = player.y;
@@ -946,6 +1051,48 @@ void update_camera(void) {
   camera_y = clamp_float(camera_y, 0.0f, (float)(WORLD_H - SCREEN_H));
 }
 
+unsigned char encode_hex_digit(int digit) {
+  static const unsigned char hex_codes[16] = {
+      0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07,
+      0x7F, 0x6F, 0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71};
+
+  if (digit < 0) {
+    return 0x00;
+  }
+
+  return hex_codes[digit & 0x0F];
+}
+
+void update_score_display(void) {
+  int value = score;
+  int digit0 = value % 10;
+  int digit1;
+  int digit2;
+  int digit3;
+  int digit4;
+  int digit5;
+  int hex30;
+  int hex54;
+
+  value /= 10;
+  digit1 = (value > 0) ? (value % 10) : -1;
+  value /= 10;
+  digit2 = (value > 0) ? (value % 10) : -1;
+  value /= 10;
+  digit3 = (value > 0) ? (value % 10) : -1;
+  value /= 10;
+  digit4 = (value > 0) ? (value % 10) : -1;
+  value /= 10;
+  digit5 = (value > 0) ? (value % 10) : -1;
+
+  hex30 = (int)encode_hex_digit(digit0) | ((int)encode_hex_digit(digit1) << 8) |
+          ((int)encode_hex_digit(digit2) << 16) | ((int)encode_hex_digit(digit3) << 24);
+  hex54 = (int)encode_hex_digit(digit4) | ((int)encode_hex_digit(digit5) << 8);
+
+  *HEX3_HEX0_ptr = hex30;
+  *HEX5_HEX4_ptr = hex54;
+}
+
 void draw_world(void) {
   int start_col = (int)(camera_x / TILE_SIZE);
   int start_row = (int)(camera_y / TILE_SIZE);
@@ -995,6 +1142,8 @@ void draw_tile(int col, int row, int screen_x, int screen_y) {
     draw_rect(screen_x + 4, screen_y + 4, TILE_SIZE - 8, TILE_SIZE - 8, WHITE);
   } else if (tile == TILE_GRASS) {
     draw_rect(screen_x + 10, screen_y + 10, 4, 4, GREEN);
+  } else if (tile == TILE_ROAD && cash_pickups[row][col]) {
+    draw_rect(screen_x + 13, screen_y + 13, 6, 6, BLACK);
   }
 }
 
