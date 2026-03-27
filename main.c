@@ -147,14 +147,15 @@ void draw_world(void);
 void draw_tile(int col, int row, int screen_x, int screen_y);
 void draw_player(void);
 void draw_police_car(void);
-void draw_filled_car(float world_x, float world_y, float angle, short int body_color,
-                     short int nose_color);
+void draw_filled_car(float world_x, float world_y, float angle,
+                     short int body_color, short int nose_color);
 
 int clamp_int(int value, int min_value, int max_value);
 float clamp_float(float value, float min_value, float max_value);
 int world_to_screen_x(float world_x);
 int world_to_screen_y(float world_y);
 
+// Main game loop
 int main(void) {
   init_buffers();
   seed_rng(0x24324324u);
@@ -165,14 +166,16 @@ int main(void) {
   update_camera();
   update_score_display();
 
+  // Game loop
   while (1) {
     process_keyboard_ps2();
 
+    // If reset key is pressed, reset game
     if (key_r) {
       reset_cash_pickups();
       reset_player();
       spawn_police_car();
-    } else {
+    } else {  // Update game state
       update_player();
       collect_cash_pickups();
       update_police_car();
@@ -183,10 +186,10 @@ int main(void) {
     draw_world();
     swap_buffers();
   }
-
   return 0;
 }
 
+// Declare double buffering functions and game logic functions
 void init_buffers(void) {
   *(pixel_ctrl_ptr + 1) = (int)&Buffer1;
   wait_for_vsync();
@@ -198,20 +201,24 @@ void init_buffers(void) {
   clear_screen(BLACK);
 }
 
+// Wait for vsync for buffer swap and prevent tear
 void wait_for_vsync(void) {
   *pixel_ctrl_ptr = 1;
   while ((*(pixel_ctrl_ptr + 3) & 0x01) != 0) {
   }
 }
 
+// Swap the front and back buffers
 void swap_buffers(void) {
   wait_for_vsync();
   pixel_buffer_start = *(pixel_ctrl_ptr + 1);
 }
 
+// Plot a pixel at (x, y) with the given color
 void plot_pixel(int x, int y, short int color) {
   volatile short int* pixel_addr;
 
+  // Check bounds
   if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) {
     return;
   }
@@ -220,10 +227,12 @@ void plot_pixel(int x, int y, short int color) {
   *pixel_addr = color;
 }
 
+// Fill the entire screen with a single color
 void clear_screen(short int color) {
   int y;
   int x;
 
+  // Loop through each pixel and set it to the specified color
   for (y = 0; y < SCREEN_H; y++) {
     for (x = 0; x < SCREEN_W; x++) {
       plot_pixel(x, y, color);
@@ -231,6 +240,7 @@ void clear_screen(short int color) {
   }
 }
 
+// Draw a filled rectangle at (x, y) with the specified width, height, and color
 void draw_rect(int x, int y, int width, int height, short int color) {
   int start_x = clamp_int(x, 0, SCREEN_W);
   int start_y = clamp_int(y, 0, SCREEN_H);
@@ -239,6 +249,7 @@ void draw_rect(int x, int y, int width, int height, short int color) {
   int row;
   int col;
 
+  // Loop through the rectangle area and plot each pixel
   for (row = start_y; row < end_y; row++) {
     for (col = start_x; col < end_x; col++) {
       plot_pixel(col, row, color);
@@ -246,6 +257,7 @@ void draw_rect(int x, int y, int width, int height, short int color) {
   }
 }
 
+// Bresenham's line drawing algorithm
 void draw_line(int x0, int y0, int x1, int y1, short int color) {
   int steep = (abs(y1 - y0) > abs(x1 - x0));
   int temp;
@@ -255,6 +267,7 @@ void draw_line(int x0, int y0, int x1, int y1, short int color) {
   int y_step;
   int x;
 
+  // If the line is steep, swap x and y coordinates
   if (steep) {
     temp = x0;
     x0 = y0;
@@ -264,6 +277,7 @@ void draw_line(int x0, int y0, int x1, int y1, short int color) {
     y1 = temp;
   }
 
+  // Ensure that we are drawing from left to right
   if (x0 > x1) {
     temp = x0;
     x0 = x1;
@@ -273,11 +287,13 @@ void draw_line(int x0, int y0, int x1, int y1, short int color) {
     y1 = temp;
   }
 
+  // Compute differences and error term
   dx = x1 - x0;
   dy = abs(y1 - y0);
   error = -(dx / 2);
   y_step = (y0 < y1) ? 1 : -1;
 
+  // Loop through x coordinates and plot the line
   for (x = x0; x <= x1; x++) {
     if (steep) {
       plot_pixel(y0, x, color);
@@ -285,6 +301,7 @@ void draw_line(int x0, int y0, int x1, int y1, short int color) {
       plot_pixel(x, y0, color);
     }
 
+    // Update error term and y coordinate if necessary
     error += dy;
     if (error >= 0) {
       y0 += y_step;
@@ -293,20 +310,24 @@ void draw_line(int x0, int y0, int x1, int y1, short int color) {
   }
 }
 
-void seed_rng(unsigned int seed) {
-  rng_state = seed;
-}
+// Random number generator
+void seed_rng(unsigned int seed) { rng_state = seed; }
 
+// Generates a random unsigned 32-bit integer using a linear congruential
+// generator algorithm
 unsigned int rand_u32(void) {
   rng_state = rng_state * 1664525u + 1013904223u;
   return rng_state;
 }
 
+// Generates a random integer in the range [low, high] using the rand_u32
+// function
 int rand_range(int low, int high) {
   unsigned int span = (unsigned int)(high - low + 1);
   return low + (int)(rand_u32() % span);
 }
 
+// Generate the world map with roads, buildings, and cash pickups
 void generate_map(void) {
   int row;
   int col;
@@ -331,6 +352,7 @@ void generate_map(void) {
   row_count = 0;
   col_count = 0;
 
+  // Initialize the world map with grass and borders
   for (row = 0; row < MAP_ROWS; row++) {
     for (col = 0; col < MAP_COLS; col++) {
       if (row == 0 || col == 0 || row == MAP_ROWS - 1 || col == MAP_COLS - 1) {
@@ -341,24 +363,32 @@ void generate_map(void) {
     }
   }
 
+  // Add initial roads and then randomly generate additional
   road_rows[row_count++] = 2;
   road_cols[col_count++] = 2;
 
+  // Generate horizontal roads
   next_row = 7 + rand_range(0, 2);
   while (next_row < MAP_ROWS - 4 && row_count < 9) {
     road_rows[row_count++] = next_row;
     next_row += rand_range(6, 8);
   }
 
+  // Generate vertical roads
   next_col = 7 + rand_range(0, 2);
   while (next_col < MAP_COLS - 4 && col_count < 9) {
     road_cols[col_count++] = next_col;
     next_col += rand_range(6, 8);
   }
 
-  road_rows[row_count++] = clamp_int(MAP_ROWS / 2 + rand_range(-2, 2), 2, MAP_ROWS - 3);
-  road_cols[col_count++] = clamp_int(MAP_COLS / 2 + rand_range(-2, 2), 2, MAP_COLS - 3);
+  // Add a main road roughly through the center of the map
+  road_rows[row_count++] =
+      clamp_int(MAP_ROWS / 2 + rand_range(-2, 2), 2, MAP_ROWS - 3);
+  road_cols[col_count++] =
+      clamp_int(MAP_COLS / 2 + rand_range(-2, 2), 2, MAP_COLS - 3);
 
+  // Add horizontal roads to map based on generated road row/column positions,
+  // with some random variation
   for (row = 0; row < row_count; row++) {
     add_road_row(road_rows[row]);
     if ((rand_u32() & 3u) == 0u) {
@@ -366,6 +396,8 @@ void generate_map(void) {
     }
   }
 
+  // Add vertical roads to map based on generated road row/column positions,
+  // with some random variation
   for (col = 0; col < col_count; col++) {
     add_road_col(road_cols[col]);
     if ((rand_u32() & 3u) == 0u) {
@@ -373,6 +405,7 @@ void generate_map(void) {
     }
   }
 
+  // Add additonal random corridors between generated roads
   for (row = 0; row < row_count - 1; row++) {
     corridor = rand_range(road_rows[row], road_rows[row + 1]);
     start = road_cols[rand_range(0, col_count - 1)];
@@ -383,6 +416,7 @@ void generate_map(void) {
       end = temp;
     }
 
+    // Clamp the corridor so it doesnt go out of bounds
     corridor = clamp_int(corridor, 1, MAP_ROWS - 2);
     for (col = start; col <= end; col++) {
       world_map[corridor][col] = TILE_ROAD;
@@ -392,6 +426,7 @@ void generate_map(void) {
     }
   }
 
+  // Add additonal random corridors between generated roads
   for (col = 0; col < col_count - 1; col++) {
     corridor = rand_range(road_cols[col], road_cols[col + 1]);
     start = road_rows[rand_range(0, row_count - 1)];
@@ -411,6 +446,7 @@ void generate_map(void) {
     }
   }
 
+  // Add random branches off the main roads
   for (branch = 0; branch < 14; branch++) {
     branch_row = rand_range(2, MAP_ROWS - 3);
     branch_col = rand_range(2, MAP_COLS - 3);
@@ -445,6 +481,7 @@ void generate_map(void) {
   ensure_spawn_area();
 }
 
+// Add a horizontal road at the specified row, with bounds checking
 void add_road_row(int row) {
   int col;
 
@@ -454,6 +491,7 @@ void add_road_row(int row) {
   }
 }
 
+// Add a vertical road at the specified column, with bounds checking
 void add_road_col(int col) {
   int row;
 
@@ -463,6 +501,7 @@ void add_road_col(int col) {
   }
 }
 
+// Place buildings on the map in random locations
 void place_buildings(void) {
   int row;
   int col;
@@ -474,6 +513,9 @@ void place_buildings(void) {
   int check_col;
   bool can_place;
 
+  // Randomly place a building block on the map of two possible sizes
+  // Ensure no overlapping with roads or other buildings, and leave a gap of at
+  // least 2 tiles
   for (row = 2; row < MAP_ROWS - 3; row++) {
     for (col = 2; col < MAP_COLS - 3; col++) {
       if (world_map[row][col] != TILE_GRASS) {
@@ -488,7 +530,10 @@ void place_buildings(void) {
       block_w = rand_range(1, 2);
       can_place = true;
 
-      for (check_row = row - 2; check_row <= row + block_h + 1 && can_place; check_row++) {
+      // Check a 2 tile border around the proposed building location to ensure
+      // there is enough space and no roads nearby
+      for (check_row = row - 2; check_row <= row + block_h + 1 && can_place;
+           check_row++) {
         for (check_col = col - 2; check_col <= col + block_w + 1; check_col++) {
           if (check_row <= 0 || check_col <= 0 || check_row >= MAP_ROWS - 1 ||
               check_col >= MAP_COLS - 1) {
@@ -503,10 +548,14 @@ void place_buildings(void) {
         }
       }
 
+      // Cannot place building if no enough space or too close to another
+      // building or road
       if (!can_place) {
         continue;
       }
 
+      // Check the planned building area to ensure only grass and no overlap
+      // with roads or other buildings
       for (r = row; r < row + block_h; r++) {
         for (c = col; c < col + block_w; c++) {
           if (world_map[r][c] != TILE_GRASS) {
@@ -515,10 +564,12 @@ void place_buildings(void) {
         }
       }
 
+      // Cannot place building if planned area is not clear grass
       if (!can_place) {
         continue;
       }
 
+      // Place the building by marking the tiles as TILE_BUILDING
       for (r = row; r < row + block_h; r++) {
         for (c = col; c < col + block_w; c++) {
           world_map[r][c] = TILE_BUILDING;
@@ -528,6 +579,8 @@ void place_buildings(void) {
   }
 }
 
+// Prevent one-tile wide grass paths between roads from being too narrow
+// Adds extra grass tiles to widen path if only one tile between two buildings
 void widen_tight_grass_paths(void) {
   int pass;
   int row;
@@ -553,10 +606,12 @@ void widen_tight_grass_paths(void) {
         down_blocked = is_blocking_tile(col, row + 1);
         vertical_corridor = !up_blocked && !down_blocked;
         horizontal_corridor = !left_blocked && !right_blocked;
-        touches_road = is_road_tile(col - 1, row) || is_road_tile(col + 1, row) ||
+        touches_road = is_road_tile(col - 1, row) ||
+                       is_road_tile(col + 1, row) ||
                        is_road_tile(col, row - 1) || is_road_tile(col, row + 1);
 
-        if (touches_road && left_blocked && right_blocked && vertical_corridor) {
+        if (touches_road && left_blocked && right_blocked &&
+            vertical_corridor) {
           if (world_map[row][col - 1] == TILE_BUILDING) {
             world_map[row][col - 1] = TILE_GRASS;
           }
@@ -578,10 +633,12 @@ void widen_tight_grass_paths(void) {
   }
 }
 
+// Ensure spawn area is clear
 void ensure_spawn_area(void) {
   int row;
   int col;
 
+  // Clear a spawn area that is empty and easy for user to navigate
   for (row = 1; row < 5; row++) {
     for (col = 1; col < 5; col++) {
       world_map[row][col] = TILE_ROAD;
@@ -599,18 +656,21 @@ void ensure_spawn_area(void) {
   }
 }
 
+// Reset cash pickups on the map - clear and replace
 void reset_cash_pickups(void) {
   int row;
   int col;
 
   score = 0;
 
+  // Clear all cash pickups from the map
   for (row = 0; row < MAP_ROWS; row++) {
     for (col = 0; col < MAP_COLS; col++) {
       cash_pickups[row][col] = false;
     }
   }
 
+  // Random place cash pickups on map
   for (row = 0; row < MAP_ROWS; row++) {
     for (col = 0; col < MAP_COLS; col++) {
       if (pickup_can_spawn_at(col, row) && (rand_u32() % 100u) < 22u) {
@@ -623,6 +683,7 @@ void reset_cash_pickups(void) {
   update_score_display();
 }
 
+// Check if cash can spawn at specified location
 bool pickup_can_spawn_at(int col, int row) {
   int check_row;
   int check_col;
@@ -637,7 +698,8 @@ bool pickup_can_spawn_at(int col, int row) {
 
   for (check_row = row - 1; check_row <= row + 1; check_row++) {
     for (check_col = col - 1; check_col <= col + 1; check_col++) {
-      if (check_row < 0 || check_col < 0 || check_row >= MAP_ROWS || check_col >= MAP_COLS) {
+      if (check_row < 0 || check_col < 0 || check_row >= MAP_ROWS ||
+          check_col >= MAP_COLS) {
         continue;
       }
 
@@ -650,6 +712,7 @@ bool pickup_can_spawn_at(int col, int row) {
   return true;
 }
 
+// Reset player position, angle, and speed to initial values
 void reset_player(void) {
   player.x = 1.5f * TILE_SIZE;
   player.y = 1.5f * TILE_SIZE;
@@ -657,6 +720,7 @@ void reset_player(void) {
   player.speed = 0.0f;
 }
 
+// Spawn police car at random road location, set inital direction towards player
 void spawn_police_car(void) {
   int attempts;
   int col;
@@ -689,7 +753,8 @@ void spawn_police_car(void) {
 
     police_car.x = spawn_x;
     police_car.y = spawn_y;
-    police_car.angle = atan2f(-(player.y - police_car.y), player.x - police_car.x);
+    police_car.angle =
+        atan2f(-(player.y - police_car.y), player.x - police_car.x);
     police_car.speed = 0.0f;
     police_car.active = true;
     return;
@@ -702,6 +767,7 @@ void spawn_police_car(void) {
   police_car.active = true;
 }
 
+// Read PS/2 keyboard input and update key states accordingly
 void process_keyboard_ps2(void) {
   int data;
 
@@ -715,6 +781,7 @@ void process_keyboard_ps2(void) {
   }
 }
 
+// Handle a single byte from the PS/2 keyboard, updating key states for pressed
 void handle_keyboard_byte(unsigned char byte) {
   if (byte == 0xE0) {
     extended_code = true;
@@ -734,6 +801,8 @@ void handle_keyboard_byte(unsigned char byte) {
   extended_code = false;
 }
 
+// Update the state of the keys based on the scan code and whether it was a
+// press or release
 void update_key_state(unsigned char scan, bool pressed) {
   switch (scan) {
     case 0x1D:
@@ -756,14 +825,18 @@ void update_key_state(unsigned char scan, bool pressed) {
   }
 }
 
+// Check if the tile at the specified column and row is blocking (building or
+// border)
 bool is_blocking_tile(int col, int row) {
   if (col < 0 || row < 0 || col >= MAP_COLS || row >= MAP_ROWS) {
     return true;
   }
 
-  return world_map[row][col] == TILE_BUILDING || world_map[row][col] == TILE_BORDER;
+  return world_map[row][col] == TILE_BUILDING ||
+         world_map[row][col] == TILE_BORDER;
 }
 
+// Check if the tile at the specified column and row is a road tile
 bool is_road_tile(int col, int row) {
   if (col < 0 || row < 0 || col >= MAP_COLS || row >= MAP_ROWS) {
     return false;
@@ -772,6 +845,7 @@ bool is_road_tile(int col, int row) {
   return world_map[row][col] == TILE_ROAD;
 }
 
+// Get the type of tile at the specified world coordinates, with bounds checking
 TileType get_tile_at_world(float world_x, float world_y) {
   int col = (int)(world_x / TILE_SIZE);
   int row = (int)(world_y / TILE_SIZE);
@@ -783,6 +857,8 @@ TileType get_tile_at_world(float world_x, float world_y) {
   return world_map[row][col];
 }
 
+// Check if a collision would occur at the specified world coordinates by
+// checking tiles around car collision radius
 bool check_collision(float next_x, float next_y) {
   int min_col = (int)((next_x - CAR_COLLISION_RADIUS) / TILE_SIZE);
   int max_col = (int)((next_x + CAR_COLLISION_RADIUS) / TILE_SIZE);
@@ -802,6 +878,8 @@ bool check_collision(float next_x, float next_y) {
   return false;
 }
 
+// Check for collision between player and police car, and resolve by pushing
+// them apart and reducing speed
 bool check_player_police_collision(void) {
   float dx;
   float dy;
@@ -873,11 +951,17 @@ bool check_player_police_collision(void) {
   return true;
 }
 
+// Check for cash pickups within pickup radius of player, collect them, and
+// update score
 void collect_cash_pickups(void) {
-  int min_col = clamp_int((int)((player.x - CASH_PICKUP_RADIUS) / TILE_SIZE), 0, MAP_COLS - 1);
-  int max_col = clamp_int((int)((player.x + CASH_PICKUP_RADIUS) / TILE_SIZE), 0, MAP_COLS - 1);
-  int min_row = clamp_int((int)((player.y - CASH_PICKUP_RADIUS) / TILE_SIZE), 0, MAP_ROWS - 1);
-  int max_row = clamp_int((int)((player.y + CASH_PICKUP_RADIUS) / TILE_SIZE), 0, MAP_ROWS - 1);
+  int min_col = clamp_int((int)((player.x - CASH_PICKUP_RADIUS) / TILE_SIZE), 0,
+                          MAP_COLS - 1);
+  int max_col = clamp_int((int)((player.x + CASH_PICKUP_RADIUS) / TILE_SIZE), 0,
+                          MAP_COLS - 1);
+  int min_row = clamp_int((int)((player.y - CASH_PICKUP_RADIUS) / TILE_SIZE), 0,
+                          MAP_ROWS - 1);
+  int max_row = clamp_int((int)((player.y + CASH_PICKUP_RADIUS) / TILE_SIZE), 0,
+                          MAP_ROWS - 1);
   int row;
   int col;
   bool score_changed = false;
@@ -911,11 +995,14 @@ void collect_cash_pickups(void) {
   }
 }
 
+// Update the player's position, angle, and speed based on input and collisions
 void update_player(void) {
   float old_x = player.x;
   float old_y = player.y;
   float old_speed = player.speed;
-  float traction = (get_tile_at_world(player.x, player.y) == TILE_GRASS) ? grass_drag : road_drag;
+  float traction = (get_tile_at_world(player.x, player.y) == TILE_GRASS)
+                       ? grass_drag
+                       : road_drag;
   float dx;
   float dy;
   float next_x;
@@ -955,7 +1042,8 @@ void update_player(void) {
   }
 
   player.speed *= traction;
-  player.speed = clamp_float(player.speed, max_reverse_speed, max_forward_speed);
+  player.speed =
+      clamp_float(player.speed, max_reverse_speed, max_forward_speed);
 
   dx = cosf(player.angle) * player.speed;
   dy = -sinf(player.angle) * player.speed;
@@ -981,6 +1069,8 @@ void update_player(void) {
   }
 }
 
+// Update the police car's position, angle, and speed to chase the player, with
+// simple steering and collision avoiding
 void update_police_car(void) {
   float target_angle;
   float angle_diff;
@@ -1039,10 +1129,12 @@ void update_police_car(void) {
   }
 
   if (check_player_police_collision()) {
-    police_car.angle = atan2f(-(player.y - police_car.y), player.x - police_car.x);
+    police_car.angle =
+        atan2f(-(player.y - police_car.y), player.x - police_car.x);
   }
 }
 
+// Update the camera position to center on the player
 void update_camera(void) {
   camera_x = player.x - (SCREEN_W / 2.0f);
   camera_y = player.y - (SCREEN_H / 2.0f);
@@ -1051,6 +1143,8 @@ void update_camera(void) {
   camera_y = clamp_float(camera_y, 0.0f, (float)(WORLD_H - SCREEN_H));
 }
 
+// Encode a single digit (0-9) as the corresponding 7-segment display code for
+// the HEX displays
 unsigned char encode_hex_digit(int digit) {
   static const unsigned char hex_codes[16] = {
       0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07,
@@ -1063,6 +1157,7 @@ unsigned char encode_hex_digit(int digit) {
   return hex_codes[digit & 0x0F];
 }
 
+// Update HEX display to show current score
 void update_score_display(void) {
   int value = score;
   int digit0 = value % 10;
@@ -1086,13 +1181,15 @@ void update_score_display(void) {
   digit5 = (value > 0) ? (value % 10) : -1;
 
   hex30 = (int)encode_hex_digit(digit0) | ((int)encode_hex_digit(digit1) << 8) |
-          ((int)encode_hex_digit(digit2) << 16) | ((int)encode_hex_digit(digit3) << 24);
+          ((int)encode_hex_digit(digit2) << 16) |
+          ((int)encode_hex_digit(digit3) << 24);
   hex54 = (int)encode_hex_digit(digit4) | ((int)encode_hex_digit(digit5) << 8);
 
   *HEX3_HEX0_ptr = hex30;
   *HEX5_HEX4_ptr = hex54;
 }
 
+// Draw the world, with player and police car on top
 void draw_world(void) {
   int start_col = (int)(camera_x / TILE_SIZE);
   int start_row = (int)(camera_y / TILE_SIZE);
@@ -1119,6 +1216,7 @@ void draw_world(void) {
   draw_player();
 }
 
+// Draw a single tile at the specified column and row, with the top-left corner
 void draw_tile(int col, int row, int screen_x, int screen_y) {
   TileType tile = world_map[row][col];
   short int fill = BLACK;
@@ -1159,8 +1257,8 @@ void draw_police_car(void) {
   draw_filled_car(police_car.x, police_car.y, police_car.angle, BLUE, RED);
 }
 
-void draw_filled_car(float world_x, float world_y, float angle, short int body_color,
-                     short int nose_color) {
+void draw_filled_car(float world_x, float world_y, float angle,
+                     short int body_color, short int nose_color) {
   int cx = world_to_screen_x(world_x);
   int cy = world_to_screen_y(world_y);
   float forward_x = cosf(angle);
@@ -1206,32 +1304,6 @@ float clamp_float(float value, float min_value, float max_value) {
   return value;
 }
 
-int world_to_screen_x(float world_x) {
-  return (int)(world_x - camera_x);
-}
+int world_to_screen_x(float world_x) { return (int)(world_x - camera_x); }
 
-int world_to_screen_y(float world_y) {
-  return (int)(world_y - camera_y);
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+int world_to_screen_y(float world_y) { return (int)(world_y - camera_y); }
