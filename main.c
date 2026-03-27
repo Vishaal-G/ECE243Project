@@ -5,6 +5,7 @@
 
 #define PIXEL_BUF_CTRL_BASE 0xFF203020
 #define PS2_BASE 0xFF200100
+#define LEDR_BASE 0xFF200000
 #define HEX3_HEX0_BASE 0xFF200020
 #define HEX5_HEX4_BASE 0xFF200030
 
@@ -25,6 +26,9 @@
 #define CASH_PICKUP_RADIUS 18.0f
 
 #define PI 3.14159265f
+#define FRAME_RATE 60
+#define MAX_LIVES 10
+#define POLICE_FREEZE_FRAMES (5 * FRAME_RATE)
 
 #define BLACK 0x0000
 #define WHITE 0xFFFF
@@ -62,6 +66,7 @@ typedef struct {
 
 volatile int* pixel_ctrl_ptr = (int*)PIXEL_BUF_CTRL_BASE;
 volatile int* PS2_ptr = (int*)PS2_BASE;
+volatile int* LEDR_ptr = (int*)LEDR_BASE;
 volatile int* HEX3_HEX0_ptr = (int*)HEX3_HEX0_BASE;
 volatile int* HEX5_HEX4_ptr = (int*)HEX5_HEX4_BASE;
 
@@ -77,6 +82,8 @@ static PoliceCar police_car;
 static float camera_x = 0.0f;
 static float camera_y = 0.0f;
 static int score = 0;
+static int player_lives = MAX_LIVES;
+static int police_freeze_frames = 0;
 
 static bool key_w = false;
 static bool key_s = false;
@@ -124,10 +131,12 @@ void ensure_spawn_area(void);
 void reset_cash_pickups(void);
 void collect_cash_pickups(void);
 void update_score_display(void);
+void update_lives_display(void);
 unsigned char encode_hex_digit(int digit);
 bool pickup_can_spawn_at(int col, int row);
 
 void reset_player(void);
+void reset_player_status(void);
 void spawn_police_car(void);
 void process_keyboard_ps2(void);
 void handle_keyboard_byte(unsigned char byte);
@@ -138,12 +147,17 @@ TileType get_tile_at_world(float world_x, float world_y);
 bool check_collision(float next_x, float next_y);
 bool is_road_tile(int col, int row);
 bool check_player_police_collision(void);
+void register_player_hit(void);
+void update_timers(void);
+void get_police_difficulty(float* accel, float* drag, float* max_speed,
+                           float* turn_rate, float* lead_scale);
 
 void update_player(void);
 void update_police_car(void);
 void update_camera(void);
 
 void draw_world(void);
+void draw_health_bar(void);
 void draw_tile(int col, int row, int screen_x, int screen_y);
 void draw_player(void);
 void draw_police_car(void);
@@ -162,6 +176,7 @@ int main(void) {
   generate_map();
   reset_cash_pickups();
   reset_player();
+  reset_player_status();
   spawn_police_car();
   update_camera();
   update_score_display();
@@ -169,11 +184,13 @@ int main(void) {
   // Game loop
   while (1) {
     process_keyboard_ps2();
+    update_timers();
 
     // If reset key is pressed, reset game
     if (key_r) {
       reset_cash_pickups();
       reset_player();
+      reset_player_status();
       spawn_police_car();
     } else {  // Update game state
       update_player();
@@ -720,6 +737,13 @@ void reset_player(void) {
   player.speed = 0.0f;
 }
 
+// Reset player lives and any active police freeze timer
+void reset_player_status(void) {
+  player_lives = MAX_LIVES;
+  police_freeze_frames = 0;
+  update_lives_display();
+}
+
 // Spawn police car at random road location, set inital direction towards player
 void spawn_police_car(void) {
   int attempts;
@@ -948,7 +972,39 @@ bool check_player_police_collision(void) {
     police_car.y -= ny * (overlap * 0.5f);
   }
 
+  register_player_hit();
+
   return true;
+}
+
+// Take one life on contact, then freeze police for a short grace period
+void register_player_hit(void) {
+  if (police_freeze_frames > 0 || player_lives <= 0) {
+    return;
+  }
+
+  player_lives--;
+  police_freeze_frames = POLICE_FREEZE_FRAMES;
+  update_lives_display();
+}
+
+// Count down frame-based timers once per game loop
+void update_timers(void) {
+  if (police_freeze_frames > 0) {
+    police_freeze_frames--;
+  }
+}
+
+// Increase police chase strength as the score grows
+void get_police_difficulty(float* accel, float* drag, float* max_speed,
+                           float* turn_rate, float* lead_scale) {
+  float difficulty = clamp_float((float)score / 20.0f, 0.0f, 1.0f);
+
+  *accel = police_accel + 0.18f * difficulty;
+  *drag = police_drag + 0.015f * difficulty;
+  *max_speed = police_max_speed + 2.5f * difficulty;
+  *turn_rate = police_turn_rate + 0.030f * difficulty;
+  *lead_scale = 8.0f + 16.0f * difficulty;
 }
 
 // Check for cash pickups within pickup radius of player, collect them, and
@@ -1072,6 +1128,13 @@ void update_player(void) {
 // Update the police car's position, angle, and speed to chase the player, with
 // simple steering and collision avoiding
 void update_police_car(void) {
+  float chase_accel;
+  float chase_drag;
+  float chase_max_speed;
+  float chase_turn_rate;
+  float lead_scale;
+  float target_x;
+  float target_y;
   float target_angle;
   float angle_diff;
   float next_x;
@@ -1081,7 +1144,22 @@ void update_police_car(void) {
     return;
   }
 
-  target_angle = atan2f(-(player.y - police_car.y), player.x - police_car.x);
+  if (police_freeze_frames > 0) {
+    police_car.speed = 0.0f;
+    return;
+  }
+
+  get_police_difficulty(&chase_accel, &chase_drag, &chase_max_speed,
+                        &chase_turn_rate, &lead_scale);
+
+  target_x = player.x + cosf(player.angle) * player.speed * lead_scale;
+  target_y = player.y - sinf(player.angle) * player.speed * lead_scale;
+  target_x =
+      clamp_float(target_x, 1.5f * TILE_SIZE, (MAP_COLS - 1.5f) * TILE_SIZE);
+  target_y =
+      clamp_float(target_y, 1.5f * TILE_SIZE, (MAP_ROWS - 1.5f) * TILE_SIZE);
+
+  target_angle = atan2f(-(target_y - police_car.y), target_x - police_car.x);
   angle_diff = target_angle - police_car.angle;
 
   while (angle_diff > PI) {
@@ -1091,10 +1169,10 @@ void update_police_car(void) {
     angle_diff += 2.0f * PI;
   }
 
-  if (angle_diff > police_turn_rate) {
-    angle_diff = police_turn_rate;
-  } else if (angle_diff < -police_turn_rate) {
-    angle_diff = -police_turn_rate;
+  if (angle_diff > chase_turn_rate) {
+    angle_diff = chase_turn_rate;
+  } else if (angle_diff < -chase_turn_rate) {
+    angle_diff = -chase_turn_rate;
   }
 
   police_car.angle += angle_diff;
@@ -1105,11 +1183,11 @@ void update_police_car(void) {
     police_car.angle += 2.0f * PI;
   }
 
-  police_car.speed += police_accel;
-  if (police_car.speed > police_max_speed) {
-    police_car.speed = police_max_speed;
+  police_car.speed += chase_accel;
+  if (police_car.speed > chase_max_speed) {
+    police_car.speed = chase_max_speed;
   }
-  police_car.speed *= police_drag;
+  police_car.speed *= chase_drag;
 
   next_x = police_car.x + cosf(police_car.angle) * police_car.speed;
   next_y = police_car.y - sinf(police_car.angle) * police_car.speed;
@@ -1189,6 +1267,21 @@ void update_score_display(void) {
   *HEX5_HEX4_ptr = hex54;
 }
 
+// Update the board LEDs so the number of lit LEDs matches remaining lives
+void update_lives_display(void) {
+  unsigned int led_mask;
+
+  if (player_lives <= 0) {
+    led_mask = 0u;
+  } else if (player_lives >= MAX_LIVES) {
+    led_mask = (1u << MAX_LIVES) - 1u;
+  } else {
+    led_mask = (1u << player_lives) - 1u;
+  }
+
+  *LEDR_ptr = (int)led_mask;
+}
+
 // Draw the world, with player and police car on top
 void draw_world(void) {
   int start_col = (int)(camera_x / TILE_SIZE);
@@ -1214,6 +1307,50 @@ void draw_world(void) {
 
   draw_police_car();
   draw_player();
+  draw_health_bar();
+}
+
+// Draw a segmented health bar on the VGA display
+void draw_health_bar(void) {
+  const int border = 1;
+  const int padding = 3;
+  const int gap = 2;
+  const int segment_w = 8;
+  const int bar_h = 12;
+  const int segments_w = MAX_LIVES * segment_w + (MAX_LIVES - 1) * gap;
+  const int panel_x = 8;
+  const int panel_y = 8;
+  const int panel_w = segments_w + (padding * 2) + (border * 2);
+  const int panel_h = bar_h + (padding * 2) + (border * 2);
+  const int bar_x = panel_x + border + padding;
+  const int bar_y = panel_y + border + padding;
+  int segment;
+  short int border_color = WHITE;
+  short int fill_color = GREEN;
+
+  if (player_lives <= 3) {
+    fill_color = RED;
+  } else if (player_lives <= 6) {
+    fill_color = YELLOW;
+  }
+
+  if (police_freeze_frames > 0) {
+    border_color = BLUE;
+  }
+
+  draw_rect(panel_x, panel_y, panel_w, panel_h, BLACK);
+  draw_rect(panel_x, panel_y, panel_w, 1, border_color);
+  draw_rect(panel_x, panel_y + panel_h - 1, panel_w, 1, border_color);
+  draw_rect(panel_x, panel_y, 1, panel_h, border_color);
+  draw_rect(panel_x + panel_w - 1, panel_y, 1, panel_h, border_color);
+
+  for (segment = 0; segment < MAX_LIVES; segment++) {
+    int segment_x = bar_x + segment * (segment_w + gap);
+    short int segment_color =
+        (segment < player_lives) ? fill_color : DARK_GRAY;
+
+    draw_rect(segment_x, bar_y, segment_w, bar_h, segment_color);
+  }
 }
 
 // Draw a single tile at the specified column and row, with the top-left corner
