@@ -28,7 +28,7 @@
 #define PI 3.14159265f
 #define FRAME_RATE 60
 #define MAX_LIVES 10
-#define POLICE_FREEZE_FRAMES (5 * FRAME_RATE)
+#define POLICE_FREEZE_FRAMES 70
 
 #define BLACK 0x0000
 #define WHITE 0xFFFF
@@ -972,18 +972,66 @@ bool check_player_police_collision(void) {
     police_car.y -= ny * (overlap * 0.5f);
   }
 
-  register_player_hit();
+  if (police_freeze_frames <= 0) {
+    register_player_hit();
+  }
 
   return true;
 }
 
 // Take one life on contact, then freeze police for a short grace period
 void register_player_hit(void) {
+  float dx;
+  float dy;
+  float distance;
+  float nx;
+  float ny;
+  float safe_distance;
+  float candidate_x;
+  float candidate_y;
+  int attempt;
+  bool found_spot = false;
+
   if (police_freeze_frames > 0 || player_lives <= 0) {
     return;
   }
 
   player_lives--;
+  player.speed = 0.0f;
+  police_car.speed = 0.0f;
+
+  dx = police_car.x - player.x;
+  dy = police_car.y - player.y;
+  distance = sqrtf(dx * dx + dy * dy);
+  if (distance < 0.001f) {
+    nx = 1.0f;
+    ny = 0.0f;
+  } else {
+    nx = dx / distance;
+    ny = dy / distance;
+  }
+
+  for (attempt = 3; attempt <= 8; attempt++) {
+    safe_distance = POLICE_PLAYER_HIT_RADIUS * (float)attempt;
+    candidate_x = player.x + nx * safe_distance;
+    candidate_y = player.y + ny * safe_distance;
+
+    if (!check_collision(candidate_x, candidate_y) &&
+        is_road_tile((int)(candidate_x / TILE_SIZE),
+                     (int)(candidate_y / TILE_SIZE))) {
+      police_car.x = candidate_x;
+      police_car.y = candidate_y;
+      found_spot = true;
+      break;
+    }
+  }
+
+  if (!found_spot) {
+    spawn_police_car();
+  }
+
+  police_car.angle =
+      atan2f(-(player.y - police_car.y), player.x - police_car.x);
   police_freeze_frames = POLICE_FREEZE_FRAMES;
   update_lives_display();
 }
@@ -992,6 +1040,9 @@ void register_player_hit(void) {
 void update_timers(void) {
   if (police_freeze_frames > 0) {
     police_freeze_frames--;
+    if (police_freeze_frames == 0 && police_car.active) {
+      police_car.speed = 1.2f;
+    }
   }
 }
 
@@ -1346,8 +1397,7 @@ void draw_health_bar(void) {
 
   for (segment = 0; segment < MAX_LIVES; segment++) {
     int segment_x = bar_x + segment * (segment_w + gap);
-    short int segment_color =
-        (segment < player_lives) ? fill_color : DARK_GRAY;
+    short int segment_color = (segment < player_lives) ? fill_color : DARK_GRAY;
 
     draw_rect(segment_x, bar_y, segment_w, bar_h, segment_color);
   }
