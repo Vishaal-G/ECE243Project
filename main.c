@@ -49,6 +49,8 @@ typedef enum {
   TILE_BORDER = 3
 } TileType;
 
+#define MAX_POLICE_CARS 4
+
 typedef struct {
   float x;
   float y;
@@ -78,10 +80,13 @@ static TileType world_map[MAP_ROWS][MAP_COLS];
 static bool cash_pickups[MAP_ROWS][MAP_COLS];
 
 static Player player;
-static PoliceCar police_car;
+static PoliceCar police_cars[MAX_POLICE_CARS];
+static float police_target_x[MAX_POLICE_CARS];
+static float police_target_y[MAX_POLICE_CARS];
 static float camera_x = 0.0f;
 static float camera_y = 0.0f;
 static int score = 0;
+static int best_score = 0;
 static int player_lives = MAX_LIVES;
 static int police_freeze_frames = 0;
 
@@ -138,6 +143,9 @@ bool pickup_can_spawn_at(int col, int row);
 void reset_player(void);
 void reset_player_status(void);
 void spawn_police_car(void);
+void spawn_police_car_at_index(int index);
+int get_target_police_count(void);
+void sync_police_cars_to_score(void);
 void process_keyboard_ps2(void);
 void handle_keyboard_byte(unsigned char byte);
 void update_key_state(unsigned char scan, bool pressed);
@@ -146,20 +154,32 @@ bool is_blocking_tile(int col, int row);
 TileType get_tile_at_world(float world_x, float world_y);
 bool check_collision(float next_x, float next_y);
 bool is_road_tile(int col, int row);
+bool has_line_of_sight(float start_x, float start_y, float end_x, float end_y);
+void reset_police_targets(void);
+void ensure_police_car_valid(int index);
 bool check_player_police_collision(void);
+bool check_player_police_collision_for_index(int index);
 void register_player_hit(void);
+void register_player_hit_for_index(int index);
 void update_timers(void);
 void get_police_difficulty(float* accel, float* drag, float* max_speed,
                            float* turn_rate, float* lead_scale);
 
 void update_player(void);
+void update_single_police_car(int index);
 void update_police_car(void);
 void update_camera(void);
 
 void draw_world(void);
+void draw_game_over_screen(void);
+void draw_text(int x, int y, const char* text, int scale, short int color);
+void draw_number(int x, int y, int value, int scale, short int color);
+int get_text_width(const char* text, int scale);
+unsigned char get_glyph_row(char ch, int row);
 void draw_health_bar(void);
 void draw_tile(int col, int row, int screen_x, int screen_y);
 void draw_player(void);
+void draw_single_police_car(int index);
 void draw_police_car(void);
 void draw_filled_car(float world_x, float world_y, float angle,
                      short int body_color, short int nose_color);
@@ -184,15 +204,14 @@ int main(void) {
   // Game loop
   while (1) {
     process_keyboard_ps2();
-    update_timers();
 
-    // If reset key is pressed, reset game
     if (key_r) {
       reset_cash_pickups();
       reset_player();
       reset_player_status();
       spawn_police_car();
-    } else {  // Update game state
+    } else if (player_lives > 0) {
+      update_timers();
       update_player();
       collect_cash_pickups();
       update_police_car();
@@ -200,7 +219,11 @@ int main(void) {
     }
 
     update_camera();
-    draw_world();
+    if (player_lives > 0) {
+      draw_world();
+    } else {
+      draw_game_over_screen();
+    }
     swap_buffers();
   }
   return 0;
@@ -741,11 +764,22 @@ void reset_player(void) {
 void reset_player_status(void) {
   player_lives = MAX_LIVES;
   police_freeze_frames = 0;
+  reset_police_targets();
   update_lives_display();
 }
 
 // Spawn police car at random road location, set inital direction towards player
-void spawn_police_car(void) {
+int get_target_police_count(void) {
+  int count = 1 + score / 5;
+
+  if (count > MAX_POLICE_CARS) {
+    count = MAX_POLICE_CARS;
+  }
+
+  return count;
+}
+
+void spawn_police_car_at_index(int index) {
   int attempts;
   int col;
   int row;
@@ -754,9 +788,11 @@ void spawn_police_car(void) {
   float dx;
   float dy;
 
-  police_car.active = false;
-  police_car.speed = 0.0f;
-  police_car.angle = PI / 2.0f;
+  police_cars[index].active = false;
+  police_cars[index].speed = 0.0f;
+  police_cars[index].angle = PI / 2.0f;
+  police_target_x[index] = player.x;
+  police_target_y[index] = player.y;
 
   for (attempts = 0; attempts < 256; attempts++) {
     col = rand_range(1, MAP_COLS - 2);
@@ -771,24 +807,59 @@ void spawn_police_car(void) {
     dx = spawn_x - player.x;
     dy = spawn_y - player.y;
 
-    if (dx * dx + dy * dy < 260.0f * 260.0f) {
+    if (dx * dx + dy * dy < 170.0f * 170.0f) {
       continue;
     }
 
-    police_car.x = spawn_x;
-    police_car.y = spawn_y;
-    police_car.angle =
-        atan2f(-(player.y - police_car.y), player.x - police_car.x);
-    police_car.speed = 0.0f;
-    police_car.active = true;
+    police_cars[index].x = spawn_x;
+    police_cars[index].y = spawn_y;
+    police_cars[index].angle = atan2f(-(player.y - police_cars[index].y),
+                                      player.x - police_cars[index].x);
+    police_cars[index].speed = 0.0f;
+    police_cars[index].active = true;
+    police_target_x[index] = player.x;
+    police_target_y[index] = player.y;
     return;
   }
 
-  police_car.x = (MAP_COLS - 3.0f) * TILE_SIZE;
-  police_car.y = (MAP_ROWS - 3.0f) * TILE_SIZE;
-  police_car.angle = PI;
-  police_car.speed = 0.0f;
-  police_car.active = true;
+  police_cars[index].x = (MAP_COLS - 3.0f) * TILE_SIZE;
+  police_cars[index].y = (MAP_ROWS - 3.0f) * TILE_SIZE;
+  police_cars[index].angle = PI;
+  police_cars[index].speed = 0.0f;
+  police_cars[index].active = true;
+  police_target_x[index] = player.x;
+  police_target_y[index] = player.y;
+}
+
+void spawn_police_car(void) {
+  int i;
+  int target_count = get_target_police_count();
+
+  for (i = 0; i < MAX_POLICE_CARS; i++) {
+    police_cars[i].active = false;
+    police_cars[i].speed = 0.0f;
+    police_cars[i].angle = PI / 2.0f;
+  }
+
+  for (i = 0; i < target_count; i++) {
+    spawn_police_car_at_index(i);
+  }
+}
+
+void sync_police_cars_to_score(void) {
+  int i;
+  int target_count = get_target_police_count();
+
+  for (i = 0; i < target_count; i++) {
+    if (!police_cars[i].active) {
+      spawn_police_car_at_index(i);
+    }
+  }
+
+  for (i = target_count; i < MAX_POLICE_CARS; i++) {
+    police_cars[i].active = false;
+    police_cars[i].speed = 0.0f;
+  }
 }
 
 // Read PS/2 keyboard input and update key states accordingly
@@ -902,9 +973,58 @@ bool check_collision(float next_x, float next_y) {
   return false;
 }
 
+bool has_line_of_sight(float start_x, float start_y, float end_x, float end_y) {
+  float dx = end_x - start_x;
+  float dy = end_y - start_y;
+  float distance = sqrtf(dx * dx + dy * dy);
+  int steps;
+  int step;
+
+  if (distance < 1.0f) {
+    return true;
+  }
+
+  steps = (int)(distance / 8.0f);
+  if (steps < 1) {
+    steps = 1;
+  }
+
+  for (step = 1; step < steps; step++) {
+    float t = (float)step / (float)steps;
+    float sample_x = start_x + dx * t;
+    float sample_y = start_y + dy * t;
+
+    if (is_blocking_tile((int)(sample_x / TILE_SIZE),
+                         (int)(sample_y / TILE_SIZE))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void reset_police_targets(void) {
+  int i;
+
+  for (i = 0; i < MAX_POLICE_CARS; i++) {
+    police_target_x[i] = player.x;
+    police_target_y[i] = player.y;
+  }
+}
+
+void ensure_police_car_valid(int index) {
+  if (!police_cars[index].active) {
+    return;
+  }
+
+  if (check_collision(police_cars[index].x, police_cars[index].y)) {
+    spawn_police_car_at_index(index);
+  }
+}
+
 // Check for collision between player and police car, and resolve by pushing
 // them apart and reducing speed
-bool check_player_police_collision(void) {
+bool check_player_police_collision_for_index(int index) {
   float dx;
   float dy;
   float distance_sq;
@@ -913,13 +1033,14 @@ bool check_player_police_collision(void) {
   float nx;
   float ny;
   float overlap;
+  PoliceCar* police_car = &police_cars[index];
 
-  if (!police_car.active) {
+  if (!police_car->active) {
     return false;
   }
 
-  dx = player.x - police_car.x;
-  dy = player.y - police_car.y;
+  dx = player.x - police_car->x;
+  dy = player.y - police_car->y;
   min_distance = POLICE_PLAYER_HIT_RADIUS * 2.0f;
   distance_sq = dx * dx + dy * dy;
 
@@ -940,11 +1061,11 @@ bool check_player_police_collision(void) {
 
   player.x += nx * (overlap * 0.6f);
   player.y += ny * (overlap * 0.6f);
-  police_car.x -= nx * (overlap * 0.6f);
-  police_car.y -= ny * (overlap * 0.6f);
+  police_car->x -= nx * (overlap * 0.6f);
+  police_car->y -= ny * (overlap * 0.6f);
 
   player.speed *= -0.35f;
-  police_car.speed *= -0.20f;
+  police_car->speed *= -0.20f;
 
   if (check_collision(player.x, player.y)) {
     player.x -= nx * overlap;
@@ -952,14 +1073,14 @@ bool check_player_police_collision(void) {
     player.speed = 0.0f;
   }
 
-  if (check_collision(police_car.x, police_car.y)) {
-    police_car.x += nx * overlap;
-    police_car.y += ny * overlap;
-    police_car.speed = 0.0f;
+  if (check_collision(police_car->x, police_car->y)) {
+    police_car->x += nx * overlap;
+    police_car->y += ny * overlap;
+    police_car->speed = 0.0f;
   }
 
-  dx = player.x - police_car.x;
-  dy = player.y - police_car.y;
+  dx = player.x - police_car->x;
+  dy = player.y - police_car->y;
   distance_sq = dx * dx + dy * dy;
   if (distance_sq < min_distance * min_distance && distance_sq > 0.001f) {
     distance = sqrtf(distance_sq);
@@ -968,29 +1089,46 @@ bool check_player_police_collision(void) {
     overlap = min_distance - distance;
     player.x += nx * (overlap * 0.5f);
     player.y += ny * (overlap * 0.5f);
-    police_car.x -= nx * (overlap * 0.5f);
-    police_car.y -= ny * (overlap * 0.5f);
+    police_car->x -= nx * (overlap * 0.5f);
+    police_car->y -= ny * (overlap * 0.5f);
   }
 
   if (police_freeze_frames <= 0) {
-    register_player_hit();
+    register_player_hit_for_index(index);
   }
 
   return true;
 }
 
+bool check_player_police_collision(void) {
+  int i;
+  bool collided = false;
+
+  for (i = 0; i < MAX_POLICE_CARS; i++) {
+    if (check_player_police_collision_for_index(i)) {
+      collided = true;
+    }
+  }
+
+  return collided;
+}
+
 // Take one life on contact, then freeze police for a short grace period
-void register_player_hit(void) {
+void register_player_hit_for_index(int index) {
   float dx;
   float dy;
   float distance;
   float nx;
   float ny;
-  float safe_distance;
   float candidate_x;
   float candidate_y;
+  float safe_distance;
+  float side_x;
+  float side_y;
   int attempt;
+  int side;
   bool found_spot = false;
+  PoliceCar* police_car = &police_cars[index];
 
   if (police_freeze_frames > 0 || player_lives <= 0) {
     return;
@@ -998,10 +1136,10 @@ void register_player_hit(void) {
 
   player_lives--;
   player.speed = 0.0f;
-  police_car.speed = 0.0f;
+  police_car->speed = 0.0f;
 
-  dx = police_car.x - player.x;
-  dy = police_car.y - player.y;
+  dx = police_car->x - player.x;
+  dy = police_car->y - player.y;
   distance = sqrtf(dx * dx + dy * dy);
   if (distance < 0.001f) {
     nx = 1.0f;
@@ -1011,37 +1149,55 @@ void register_player_hit(void) {
     ny = dy / distance;
   }
 
-  for (attempt = 3; attempt <= 8; attempt++) {
-    safe_distance = POLICE_PLAYER_HIT_RADIUS * (float)attempt;
-    candidate_x = player.x + nx * safe_distance;
-    candidate_y = player.y + ny * safe_distance;
+  police_car->angle =
+      atan2f(-(player.y - police_car->y), player.x - police_car->x);
+  police_target_x[index] = player.x;
+  police_target_y[index] = player.y;
+  police_freeze_frames = POLICE_FREEZE_FRAMES;
 
-    if (!check_collision(candidate_x, candidate_y) &&
-        is_road_tile((int)(candidate_x / TILE_SIZE),
-                     (int)(candidate_y / TILE_SIZE))) {
-      police_car.x = candidate_x;
-      police_car.y = candidate_y;
-      found_spot = true;
-      break;
+  if (check_collision(police_car->x, police_car->y)) {
+    side_x = -ny;
+    side_y = nx;
+
+    for (attempt = 2; attempt <= 5 && !found_spot; attempt++) {
+      safe_distance = POLICE_PLAYER_HIT_RADIUS * (float)attempt;
+
+      for (side = -1; side <= 1; side++) {
+        candidate_x = police_car->x + nx * safe_distance +
+                      side_x * (float)side * POLICE_PLAYER_HIT_RADIUS;
+        candidate_y = police_car->y + ny * safe_distance +
+                      side_y * (float)side * POLICE_PLAYER_HIT_RADIUS;
+
+        if (!check_collision(candidate_x, candidate_y)) {
+          police_car->x = candidate_x;
+          police_car->y = candidate_y;
+          found_spot = true;
+          break;
+        }
+      }
+    }
+
+    if (!found_spot) {
+      spawn_police_car_at_index(index);
     }
   }
 
-  if (!found_spot) {
-    spawn_police_car();
-  }
-
-  police_car.angle =
-      atan2f(-(player.y - police_car.y), player.x - police_car.x);
-  police_freeze_frames = POLICE_FREEZE_FRAMES;
   update_lives_display();
 }
+
+void register_player_hit(void) { register_player_hit_for_index(0); }
 
 // Count down frame-based timers once per game loop
 void update_timers(void) {
   if (police_freeze_frames > 0) {
     police_freeze_frames--;
-    if (police_freeze_frames == 0 && police_car.active) {
-      police_car.speed = 1.2f;
+    if (police_freeze_frames == 0) {
+      int i;
+      for (i = 0; i < MAX_POLICE_CARS; i++) {
+        if (police_cars[i].active) {
+          police_cars[i].speed = 1.2f;
+        }
+      }
     }
   }
 }
@@ -1098,6 +1254,9 @@ void collect_cash_pickups(void) {
   }
 
   if (score_changed) {
+    if (score > best_score) {
+      best_score = score;
+    }
     update_score_display();
   }
 }
@@ -1178,7 +1337,7 @@ void update_player(void) {
 
 // Update the police car's position, angle, and speed to chase the player, with
 // simple steering and collision avoiding
-void update_police_car(void) {
+void update_single_police_car(int index) {
   float chase_accel;
   float chase_drag;
   float chase_max_speed;
@@ -1190,28 +1349,36 @@ void update_police_car(void) {
   float angle_diff;
   float next_x;
   float next_y;
+  PoliceCar* police_car = &police_cars[index];
 
-  if (!police_car.active) {
+  if (!police_car->active) {
     return;
   }
 
   if (police_freeze_frames > 0) {
-    police_car.speed = 0.0f;
+    police_car->speed = 0.0f;
     return;
   }
 
   get_police_difficulty(&chase_accel, &chase_drag, &chase_max_speed,
                         &chase_turn_rate, &lead_scale);
 
-  target_x = player.x + cosf(player.angle) * player.speed * lead_scale;
-  target_y = player.y - sinf(player.angle) * player.speed * lead_scale;
+  if (has_line_of_sight(police_car->x, police_car->y, player.x, player.y)) {
+    police_target_x[index] =
+        player.x + cosf(player.angle) * player.speed * lead_scale;
+    police_target_y[index] =
+        player.y - sinf(player.angle) * player.speed * lead_scale;
+  }
+
+  target_x = police_target_x[index];
+  target_y = police_target_y[index];
   target_x =
       clamp_float(target_x, 1.5f * TILE_SIZE, (MAP_COLS - 1.5f) * TILE_SIZE);
   target_y =
       clamp_float(target_y, 1.5f * TILE_SIZE, (MAP_ROWS - 1.5f) * TILE_SIZE);
 
-  target_angle = atan2f(-(target_y - police_car.y), target_x - police_car.x);
-  angle_diff = target_angle - police_car.angle;
+  target_angle = atan2f(-(target_y - police_car->y), target_x - police_car->x);
+  angle_diff = target_angle - police_car->angle;
 
   while (angle_diff > PI) {
     angle_diff -= 2.0f * PI;
@@ -1226,40 +1393,55 @@ void update_police_car(void) {
     angle_diff = -chase_turn_rate;
   }
 
-  police_car.angle += angle_diff;
+  police_car->angle += angle_diff;
 
-  if (police_car.angle > 2.0f * PI) {
-    police_car.angle -= 2.0f * PI;
-  } else if (police_car.angle < 0.0f) {
-    police_car.angle += 2.0f * PI;
+  if (police_car->angle > 2.0f * PI) {
+    police_car->angle -= 2.0f * PI;
+  } else if (police_car->angle < 0.0f) {
+    police_car->angle += 2.0f * PI;
   }
 
-  police_car.speed += chase_accel;
-  if (police_car.speed > chase_max_speed) {
-    police_car.speed = chase_max_speed;
+  police_car->speed += chase_accel;
+  if (police_car->speed > chase_max_speed) {
+    police_car->speed = chase_max_speed;
   }
-  police_car.speed *= chase_drag;
+  police_car->speed *= chase_drag;
 
-  next_x = police_car.x + cosf(police_car.angle) * police_car.speed;
-  next_y = police_car.y - sinf(police_car.angle) * police_car.speed;
+  next_x = police_car->x + cosf(police_car->angle) * police_car->speed;
+  next_y = police_car->y - sinf(police_car->angle) * police_car->speed;
 
-  if (!check_collision(next_x, police_car.y)) {
-    police_car.x = next_x;
+  if (!check_collision(next_x, police_car->y)) {
+    police_car->x = next_x;
   } else {
-    police_car.angle += PI * 0.35f;
-    police_car.speed *= 0.5f;
+    police_car->angle += PI * 0.35f;
+    police_car->speed *= 0.5f;
+    police_target_x[index] = player.x;
+    police_target_y[index] = player.y;
   }
 
-  if (!check_collision(police_car.x, next_y)) {
-    police_car.y = next_y;
+  if (!check_collision(police_car->x, next_y)) {
+    police_car->y = next_y;
   } else {
-    police_car.angle -= PI * 0.25f;
-    police_car.speed *= 0.5f;
+    police_car->angle -= PI * 0.25f;
+    police_car->speed *= 0.5f;
+    police_target_x[index] = player.x;
+    police_target_y[index] = player.y;
   }
 
-  if (check_player_police_collision()) {
-    police_car.angle =
-        atan2f(-(player.y - police_car.y), player.x - police_car.x);
+  ensure_police_car_valid(index);
+
+  if (check_player_police_collision_for_index(index)) {
+    police_car->angle =
+        atan2f(-(player.y - police_car->y), player.x - police_car->x);
+  }
+}
+
+void update_police_car(void) {
+  int i;
+
+  sync_police_cars_to_score();
+  for (i = 0; i < MAX_POLICE_CARS; i++) {
+    update_single_police_car(i);
   }
 }
 
@@ -1361,6 +1543,311 @@ void draw_world(void) {
   draw_health_bar();
 }
 
+unsigned char get_glyph_row(char ch, int row) {
+  switch (ch) {
+    case 'A': {
+      static const unsigned char rows[7] = {0x0E, 0x11, 0x11, 0x1F,
+                                            0x11, 0x11, 0x11};
+      return rows[row];
+    }
+    case 'B': {
+      static const unsigned char rows[7] = {0x1E, 0x11, 0x11, 0x1E,
+                                            0x11, 0x11, 0x1E};
+      return rows[row];
+    }
+    case 'C': {
+      static const unsigned char rows[7] = {0x0E, 0x11, 0x10, 0x10,
+                                            0x10, 0x11, 0x0E};
+      return rows[row];
+    }
+    case 'E': {
+      static const unsigned char rows[7] = {0x1F, 0x10, 0x10, 0x1E,
+                                            0x10, 0x10, 0x1F};
+      return rows[row];
+    }
+    case 'G': {
+      static const unsigned char rows[7] = {0x0E, 0x11, 0x10, 0x17,
+                                            0x11, 0x11, 0x0E};
+      return rows[row];
+    }
+    case 'M': {
+      static const unsigned char rows[7] = {0x11, 0x1B, 0x15, 0x15,
+                                            0x11, 0x11, 0x11};
+      return rows[row];
+    }
+    case 'N': {
+      static const unsigned char rows[7] = {0x11, 0x19, 0x15, 0x13,
+                                            0x11, 0x11, 0x11};
+      return rows[row];
+    }
+    case 'O': {
+      static const unsigned char rows[7] = {0x0E, 0x11, 0x11, 0x11,
+                                            0x11, 0x11, 0x0E};
+      return rows[row];
+    }
+    case 'R': {
+      static const unsigned char rows[7] = {0x1E, 0x11, 0x11, 0x1E,
+                                            0x14, 0x12, 0x11};
+      return rows[row];
+    }
+    case 'S': {
+      static const unsigned char rows[7] = {0x0F, 0x10, 0x10, 0x0E,
+                                            0x01, 0x01, 0x1E};
+      return rows[row];
+    }
+    case 'T': {
+      static const unsigned char rows[7] = {0x1F, 0x04, 0x04, 0x04,
+                                            0x04, 0x04, 0x04};
+      return rows[row];
+    }
+    case 'U': {
+      static const unsigned char rows[7] = {0x11, 0x11, 0x11, 0x11,
+                                            0x11, 0x11, 0x0E};
+      return rows[row];
+    }
+    case 'V': {
+      static const unsigned char rows[7] = {0x11, 0x11, 0x11, 0x11,
+                                            0x11, 0x0A, 0x04};
+      return rows[row];
+    }
+    case 'P': {
+      static const unsigned char rows[7] = {0x1E, 0x11, 0x11, 0x1E,
+                                            0x10, 0x10, 0x10};
+      return rows[row];
+    }
+    case 'L': {
+      static const unsigned char rows[7] = {0x10, 0x10, 0x10, 0x10,
+                                            0x10, 0x10, 0x1F};
+      return rows[row];
+    }
+    case 'I': {
+      static const unsigned char rows[7] = {0x0E, 0x04, 0x04, 0x04,
+                                            0x04, 0x04, 0x0E};
+      return rows[row];
+    }
+    case 'F': {
+      static const unsigned char rows[7] = {0x1F, 0x10, 0x10, 0x1E,
+                                            0x10, 0x10, 0x10};
+      return rows[row];
+    }
+    case 'H': {
+      static const unsigned char rows[7] = {0x11, 0x11, 0x11, 0x1F,
+                                            0x11, 0x11, 0x11};
+      return rows[row];
+    }
+    case 'D': {
+      static const unsigned char rows[7] = {0x1E, 0x11, 0x11, 0x11,
+                                            0x11, 0x11, 0x1E};
+      return rows[row];
+    }
+    case ':': {
+      static const unsigned char rows[7] = {0x00, 0x04, 0x04, 0x00,
+                                            0x04, 0x04, 0x00};
+      return rows[row];
+    }
+    case '0': {
+      static const unsigned char rows[7] = {0x0E, 0x11, 0x13, 0x15,
+                                            0x19, 0x11, 0x0E};
+      return rows[row];
+    }
+    case '1': {
+      static const unsigned char rows[7] = {0x04, 0x0C, 0x04, 0x04,
+                                            0x04, 0x04, 0x0E};
+      return rows[row];
+    }
+    case '2': {
+      static const unsigned char rows[7] = {0x0E, 0x11, 0x01, 0x02,
+                                            0x04, 0x08, 0x1F};
+      return rows[row];
+    }
+    case '3': {
+      static const unsigned char rows[7] = {0x1E, 0x01, 0x01, 0x0E,
+                                            0x01, 0x01, 0x1E};
+      return rows[row];
+    }
+    case '4': {
+      static const unsigned char rows[7] = {0x02, 0x06, 0x0A, 0x12,
+                                            0x1F, 0x02, 0x02};
+      return rows[row];
+    }
+    case '5': {
+      static const unsigned char rows[7] = {0x1F, 0x10, 0x10, 0x1E,
+                                            0x01, 0x01, 0x1E};
+      return rows[row];
+    }
+    case '6': {
+      static const unsigned char rows[7] = {0x0E, 0x10, 0x10, 0x1E,
+                                            0x11, 0x11, 0x0E};
+      return rows[row];
+    }
+    case '7': {
+      static const unsigned char rows[7] = {0x1F, 0x01, 0x02, 0x04,
+                                            0x08, 0x08, 0x08};
+      return rows[row];
+    }
+    case '8': {
+      static const unsigned char rows[7] = {0x0E, 0x11, 0x11, 0x0E,
+                                            0x11, 0x11, 0x0E};
+      return rows[row];
+    }
+    case '9': {
+      static const unsigned char rows[7] = {0x0E, 0x11, 0x11, 0x0F,
+                                            0x01, 0x01, 0x0E};
+      return rows[row];
+    }
+    default:
+      return 0x00;
+  }
+}
+
+void draw_text(int x, int y, const char* text, int scale, short int color) {
+  int cursor_x = x;
+  int index;
+  int row;
+  int col;
+
+  for (index = 0; text[index] != '\0'; index++) {
+    if (text[index] == ' ') {
+      cursor_x += 6 * scale;
+      continue;
+    }
+
+    for (row = 0; row < 7; row++) {
+      unsigned char bits = get_glyph_row(text[index], row);
+      for (col = 0; col < 5; col++) {
+        if ((bits & (1u << (4 - col))) != 0u) {
+          draw_rect(cursor_x + col * scale, y + row * scale, scale, scale,
+                    color);
+        }
+      }
+    }
+
+    cursor_x += 6 * scale;
+  }
+}
+
+int get_text_width(const char* text, int scale) {
+  int width = 0;
+  int index;
+
+  for (index = 0; text[index] != '\0'; index++) {
+    width += 6 * scale;
+  }
+
+  if (width > 0) {
+    width -= scale;
+  }
+
+  return width;
+}
+
+void draw_number(int x, int y, int value, int scale, short int color) {
+  char digits[12];
+  int length = 0;
+  int index;
+
+  if (value == 0) {
+    digits[length++] = '0';
+  } else {
+    while (value > 0 && length < 11) {
+      digits[length++] = (char)('0' + (value % 10));
+      value /= 10;
+    }
+  }
+
+  for (index = 0; index < length / 2; index++) {
+    char temp = digits[index];
+    digits[index] = digits[length - 1 - index];
+    digits[length - 1 - index] = temp;
+  }
+  digits[length] = '\0';
+
+  draw_text(x, y, digits, scale, color);
+}
+
+void draw_game_over_screen(void) {
+  const char* title = "GAME OVER";
+  const char* current_label = "CURRENT SCORE:";
+  const char* best_label = "BEST SCORE:";
+  const char* restart_label = "PRESS R TO RESTART";
+  const int title_scale = 3;
+  const int body_scale = 2;
+  const int restart_scale = 1;
+  const int title_height = 7 * title_scale;
+  const int body_height = 7 * body_scale;
+  const int restart_height = 7 * restart_scale;
+  const int gap = 10;
+  const int content_height = title_height + body_height + body_height +
+                             body_height + body_height + restart_height +
+                             gap * 5;
+  char score_digits[12];
+  char best_digits[12];
+  int score_length = 0;
+  int best_length = 0;
+  int start_y;
+  int title_y;
+  int current_label_y;
+  int score_y;
+  int best_label_y;
+  int best_score_y;
+  int restart_y;
+  int index;
+
+  if (score == 0) {
+    score_digits[score_length++] = '0';
+  } else {
+    int value = score;
+    while (value > 0 && score_length < 11) {
+      score_digits[score_length++] = (char)('0' + (value % 10));
+      value /= 10;
+    }
+  }
+  for (index = 0; index < score_length / 2; index++) {
+    char temp = score_digits[index];
+    score_digits[index] = score_digits[score_length - 1 - index];
+    score_digits[score_length - 1 - index] = temp;
+  }
+  score_digits[score_length] = '\0';
+
+  if (best_score == 0) {
+    best_digits[best_length++] = '0';
+  } else {
+    int value = best_score;
+    while (value > 0 && best_length < 11) {
+      best_digits[best_length++] = (char)('0' + (value % 10));
+      value /= 10;
+    }
+  }
+  for (index = 0; index < best_length / 2; index++) {
+    char temp = best_digits[index];
+    best_digits[index] = best_digits[best_length - 1 - index];
+    best_digits[best_length - 1 - index] = temp;
+  }
+  best_digits[best_length] = '\0';
+
+  start_y = (SCREEN_H - content_height) / 2;
+  title_y = start_y;
+  current_label_y = title_y + title_height + gap;
+  score_y = current_label_y + body_height + gap;
+  best_label_y = score_y + body_height + gap;
+  best_score_y = best_label_y + body_height + gap;
+  restart_y = best_score_y + body_height + gap;
+
+  clear_screen(BLACK);
+  draw_text((SCREEN_W - get_text_width(title, title_scale)) / 2, title_y, title,
+            title_scale, RED);
+  draw_text((SCREEN_W - get_text_width(current_label, body_scale)) / 2,
+            current_label_y, current_label, body_scale, WHITE);
+  draw_text((SCREEN_W - get_text_width(score_digits, body_scale)) / 2, score_y,
+            score_digits, body_scale, YELLOW);
+  draw_text((SCREEN_W - get_text_width(best_label, body_scale)) / 2,
+            best_label_y, best_label, body_scale, WHITE);
+  draw_text((SCREEN_W - get_text_width(best_digits, body_scale)) / 2,
+            best_score_y, best_digits, body_scale, GREEN);
+  draw_text((SCREEN_W - get_text_width(restart_label, restart_scale)) / 2,
+            restart_y, restart_label, restart_scale, LIGHT_GRAY);
+}
+
 // Draw a segmented health bar on the VGA display
 void draw_health_bar(void) {
   const int border = 1;
@@ -1436,12 +1923,21 @@ void draw_player(void) {
   draw_filled_car(player.x, player.y, player.angle, WHITE, RED);
 }
 
-void draw_police_car(void) {
-  if (!police_car.active) {
+void draw_single_police_car(int index) {
+  if (!police_cars[index].active) {
     return;
   }
 
-  draw_filled_car(police_car.x, police_car.y, police_car.angle, BLUE, RED);
+  draw_filled_car(police_cars[index].x, police_cars[index].y,
+                  police_cars[index].angle, BLUE, RED);
+}
+
+void draw_police_car(void) {
+  int i;
+
+  for (i = 0; i < MAX_POLICE_CARS; i++) {
+    draw_single_police_car(i);
+  }
 }
 
 void draw_filled_car(float world_x, float world_y, float angle,
