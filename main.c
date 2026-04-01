@@ -78,6 +78,7 @@ short int Buffer2[240][512];
 
 static TileType world_map[MAP_ROWS][MAP_COLS];
 static bool cash_pickups[MAP_ROWS][MAP_COLS];
+static int chase_distance_map[MAP_ROWS][MAP_COLS];
 
 static Player player;
 static PoliceCar police_cars[MAX_POLICE_CARS];
@@ -155,6 +156,7 @@ TileType get_tile_at_world(float world_x, float world_y);
 bool check_collision(float next_x, float next_y);
 bool is_road_tile(int col, int row);
 bool has_line_of_sight(float start_x, float start_y, float end_x, float end_y);
+void update_chase_distance_map(void);
 void reset_police_targets(void);
 void ensure_police_car_valid(int index);
 bool check_player_police_collision(void);
@@ -1003,6 +1005,64 @@ bool has_line_of_sight(float start_x, float start_y, float end_x, float end_y) {
   return true;
 }
 
+void update_chase_distance_map(void) {
+  const int max_tiles = MAP_ROWS * MAP_COLS;
+  int queue_cols[MAP_ROWS * MAP_COLS];
+  int queue_rows[MAP_ROWS * MAP_COLS];
+  int head = 0;
+  int tail = 0;
+  int start_col = clamp_int((int)(player.x / TILE_SIZE), 0, MAP_COLS - 1);
+  int start_row = clamp_int((int)(player.y / TILE_SIZE), 0, MAP_ROWS - 1);
+  int row;
+  int col;
+
+  for (row = 0; row < MAP_ROWS; row++) {
+    for (col = 0; col < MAP_COLS; col++) {
+      chase_distance_map[row][col] = -1;
+    }
+  }
+
+  if (is_blocking_tile(start_col, start_row)) {
+    return;
+  }
+
+  chase_distance_map[start_row][start_col] = 0;
+  queue_cols[tail] = start_col;
+  queue_rows[tail] = start_row;
+  tail++;
+
+  while (head < tail && tail <= max_tiles) {
+    static const int dcol[4] = {1, -1, 0, 0};
+    static const int drow[4] = {0, 0, 1, -1};
+    int current_col = queue_cols[head];
+    int current_row = queue_rows[head];
+    int current_distance = chase_distance_map[current_row][current_col];
+    int dir;
+
+    head++;
+
+    for (dir = 0; dir < 4; dir++) {
+      int next_col = current_col + dcol[dir];
+      int next_row = current_row + drow[dir];
+
+      if (next_col < 0 || next_row < 0 || next_col >= MAP_COLS ||
+          next_row >= MAP_ROWS) {
+        continue;
+      }
+
+      if (is_blocking_tile(next_col, next_row) ||
+          chase_distance_map[next_row][next_col] >= 0) {
+        continue;
+      }
+
+      chase_distance_map[next_row][next_col] = current_distance + 1;
+      queue_cols[tail] = next_col;
+      queue_rows[tail] = next_row;
+      tail++;
+    }
+  }
+}
+
 void reset_police_targets(void) {
   int i;
 
@@ -1349,6 +1409,13 @@ void update_single_police_car(int index) {
   float angle_diff;
   float next_x;
   float next_y;
+  int police_col;
+  int police_row;
+  int best_col;
+  int best_row;
+  int best_distance;
+  int step_col;
+  int step_row;
   PoliceCar* police_car = &police_cars[index];
 
   if (!police_car->active) {
@@ -1363,11 +1430,53 @@ void update_single_police_car(int index) {
   get_police_difficulty(&chase_accel, &chase_drag, &chase_max_speed,
                         &chase_turn_rate, &lead_scale);
 
+  police_target_x[index] = player.x;
+  police_target_y[index] = player.y;
+
   if (has_line_of_sight(police_car->x, police_car->y, player.x, player.y)) {
     police_target_x[index] =
         player.x + cosf(player.angle) * player.speed * lead_scale;
     police_target_y[index] =
         player.y - sinf(player.angle) * player.speed * lead_scale;
+  } else {
+    police_col = clamp_int((int)(police_car->x / TILE_SIZE), 0, MAP_COLS - 1);
+    police_row = clamp_int((int)(police_car->y / TILE_SIZE), 0, MAP_ROWS - 1);
+    best_col = police_col;
+    best_row = police_row;
+    best_distance = chase_distance_map[police_row][police_col];
+
+    for (step_row = -1; step_row <= 1; step_row++) {
+      for (step_col = -1; step_col <= 1; step_col++) {
+        int next_col = police_col + step_col;
+        int next_row = police_row + step_row;
+        int next_distance;
+
+        if ((step_col == 0 && step_row == 0) || (step_col != 0 && step_row != 0)) {
+          continue;
+        }
+
+        if (next_col < 0 || next_row < 0 || next_col >= MAP_COLS ||
+            next_row >= MAP_ROWS || is_blocking_tile(next_col, next_row)) {
+          continue;
+        }
+
+        next_distance = chase_distance_map[next_row][next_col];
+        if (next_distance < 0) {
+          continue;
+        }
+
+        if (best_distance < 0 || next_distance < best_distance) {
+          best_distance = next_distance;
+          best_col = next_col;
+          best_row = next_row;
+        }
+      }
+    }
+
+    if (best_distance >= 0) {
+      police_target_x[index] = ((float)best_col + 0.5f) * TILE_SIZE;
+      police_target_y[index] = ((float)best_row + 0.5f) * TILE_SIZE;
+    }
   }
 
   target_x = police_target_x[index];
@@ -1440,6 +1549,7 @@ void update_police_car(void) {
   int i;
 
   sync_police_cars_to_score();
+  update_chase_distance_map();
   for (i = 0; i < MAX_POLICE_CARS; i++) {
     update_single_police_car(i);
   }
