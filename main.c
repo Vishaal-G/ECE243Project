@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #define PIXEL_BUF_CTRL_BASE 0xFF203020
+#define AUDIO_BASE 0xFF203040
 #define PS2_BASE 0xFF200100
 #define LEDR_BASE 0xFF200000
 #define HEX3_HEX0_BASE 0xFF200020
@@ -68,6 +69,7 @@ typedef struct {
 } PoliceCar;
 
 volatile int* pixel_ctrl_ptr = (int*)PIXEL_BUF_CTRL_BASE;
+volatile int* audio_ptr = (int*)AUDIO_BASE;
 volatile int* PS2_ptr = (int*)PS2_BASE;
 volatile int* LEDR_ptr = (int*)LEDR_BASE;
 volatile int* HEX3_HEX0_ptr = (int*)HEX3_HEX0_BASE;
@@ -93,6 +95,8 @@ static int score = 0;
 static int best_score = 0;
 static int player_lives = MAX_LIVES;
 static int police_freeze_frames = 0;
+static unsigned int siren_phase = 0u;
+static int siren_sample_counter = 0;
 
 static bool key_w = false;
 static bool key_s = false;
@@ -175,6 +179,8 @@ void update_player(void);
 void update_single_police_car(int index);
 void update_police_car(void);
 void update_camera(void);
+bool is_police_visible(int index);
+void update_audio(void);
 
 void draw_world(void);
 void draw_game_over_screen(void);
@@ -225,6 +231,7 @@ int main(void) {
     }
 
     update_camera();
+    update_audio();
     if (player_lives > 0) {
       draw_world();
     } else {
@@ -1596,6 +1603,75 @@ void update_camera(void) {
 
   camera_x = clamp_float(camera_x, 0.0f, (float)(WORLD_W - SCREEN_W));
   camera_y = clamp_float(camera_y, 0.0f, (float)(WORLD_H - SCREEN_H));
+}
+
+bool is_police_visible(int index) {
+  float margin_x = CAR_LENGTH * 0.5f;
+  float margin_y = CAR_LENGTH * 0.5f;
+
+  if (!police_cars[index].active) {
+    return false;
+  }
+
+  return police_cars[index].x >= camera_x - margin_x &&
+         police_cars[index].x <= camera_x + SCREEN_W + margin_x &&
+         police_cars[index].y >= camera_y - margin_y &&
+         police_cars[index].y <= camera_y + SCREEN_H + margin_y;
+}
+
+void update_audio(void) {
+  const int sample_rate = 48000;
+  const int low_freq = 600;
+  const int high_freq = 900;
+  const int tone_samples = sample_rate / 4;
+  const int amplitude = 2500000;
+  int fifo_space;
+  int left_space;
+  int right_space;
+  int samples_to_write;
+  int i;
+  bool police_visible = false;
+
+  if (player_lives <= 0) {
+    siren_sample_counter = 0;
+    siren_phase = 0u;
+    return;
+  }
+
+  for (i = 0; i < MAX_POLICE_CARS; i++) {
+    if (is_police_visible(i)) {
+      police_visible = true;
+      break;
+    }
+  }
+
+  if (!police_visible) {
+    siren_sample_counter = 0;
+    siren_phase = 0u;
+    return;
+  }
+
+  fifo_space = *(audio_ptr + 1);
+  left_space = (fifo_space >> 16) & 0xFF;
+  right_space = (fifo_space >> 24) & 0xFF;
+  samples_to_write = (left_space < right_space) ? left_space : right_space;
+
+  for (i = 0; i < samples_to_write; i++) {
+    int frequency =
+        ((siren_sample_counter / tone_samples) & 1) == 0 ? low_freq : high_freq;
+    unsigned int phase_step =
+        (unsigned int)(((unsigned long long)frequency << 32) / sample_rate);
+    int sample = (siren_phase & 0x80000000u) != 0u ? amplitude : -amplitude;
+
+    *(audio_ptr + 2) = sample;
+    *(audio_ptr + 3) = sample;
+
+    siren_phase += phase_step;
+    siren_sample_counter++;
+    if (siren_sample_counter >= tone_samples * 2) {
+      siren_sample_counter = 0;
+    }
+  }
 }
 
 // Encode a single digit (0-9) as the corresponding 7-segment display code for
