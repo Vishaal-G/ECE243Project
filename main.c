@@ -35,15 +35,13 @@
 #define SPEED_BOOST_FRAMES (FRAME_RATE * 5)
 
 /* Audio sample rate assumed 8000 Hz (standard for DE1-SoC audio core).
-   The siren cycles through a slower wail and a faster yelp sweep so it
-   sounds closer to a real police siren. */
+   The siren uses a classic repeating "WEEE-UU" sweep: a longer rising glide
+   followed by a shorter falling glide. */
 #define AUDIO_SAMPLE_RATE 8000
-#define SIREN_WAIL_FRAMES 72
-#define SIREN_YELP_FRAMES 36
-#define SIREN_WAIL_FREQ_LO 620
-#define SIREN_WAIL_FREQ_HI 1180
-#define SIREN_YELP_FREQ_LO 780
-#define SIREN_YELP_FREQ_HI 1380
+#define SIREN_RISE_FRAMES 42
+#define SIREN_FALL_FRAMES 22
+#define SIREN_FREQ_LOW 680
+#define SIREN_FREQ_HIGH 1280
 #define SIREN_AMPLITUDE 0x06000000    /* keep below 0x07FFFFFF to avoid clip */
 
 #define BLACK 0x0000
@@ -121,7 +119,7 @@ static int speed_boost_frames = 0;
 
 /* ── siren state ─────────────────────────────────────────────────── */
 static int siren_phase_accum = 0;   /* fixed-point phase accumulator */
-static int siren_cycle_frame = 0;   /* frame position within wail/yelp cycle */
+static int siren_cycle_frame = 0;   /* frame position within one WEEE-UU cycle */
 /* ──────────────────────────────────────────────────────────────────── */
 
 static bool key_w = false;
@@ -315,8 +313,8 @@ bool any_police_on_screen(void) {
 /*
  * update_siren() — call once per game frame.
  *
- * Generates a police-style siren by alternating a slow wail sweep with a
- * quicker yelp sweep and writes samples into the DE1-SoC audio FIFO.
+ * Generates a classic police-style "WEEE-UU" siren by repeating one long
+ * rising sweep and one shorter falling sweep.
  *
  * No external files are needed.  The waveform is synthesised in software
  * using a 256-entry sine lookup table (stored in ROM / flash as a
@@ -360,11 +358,8 @@ void update_siren(void) {
   int sample_32;
   int n;
   int cycle_length;
-  int section_frame;
-  int section_length;
-  int freq_lo;
-  int freq_hi;
-  int triangle_pos;
+  int sweep_frame;
+  int sweep_length;
   bool playing;
 
   playing = (player_lives > 0) && any_police_on_screen();
@@ -383,26 +378,20 @@ void update_siren(void) {
     return;
   }
 
-  cycle_length = SIREN_WAIL_FRAMES + SIREN_YELP_FRAMES;
-  if (siren_cycle_frame < SIREN_WAIL_FRAMES) {
-    section_frame = siren_cycle_frame;
-    section_length = SIREN_WAIL_FRAMES;
-    freq_lo = SIREN_WAIL_FREQ_LO;
-    freq_hi = SIREN_WAIL_FREQ_HI;
+  cycle_length = SIREN_RISE_FRAMES + SIREN_FALL_FRAMES;
+  if (siren_cycle_frame < SIREN_RISE_FRAMES) {
+    sweep_frame = siren_cycle_frame;
+    sweep_length = SIREN_RISE_FRAMES;
+    freq = SIREN_FREQ_LOW +
+           ((SIREN_FREQ_HIGH - SIREN_FREQ_LOW) * sweep_frame) /
+               (sweep_length - 1);
   } else {
-    section_frame = siren_cycle_frame - SIREN_WAIL_FRAMES;
-    section_length = SIREN_YELP_FRAMES;
-    freq_lo = SIREN_YELP_FREQ_LO;
-    freq_hi = SIREN_YELP_FREQ_HI;
+    sweep_frame = siren_cycle_frame - SIREN_RISE_FRAMES;
+    sweep_length = SIREN_FALL_FRAMES;
+    freq = SIREN_FREQ_HIGH -
+           ((SIREN_FREQ_HIGH - SIREN_FREQ_LOW) * sweep_frame) /
+               (sweep_length - 1);
   }
-
-  triangle_pos = section_frame * 2;
-  if (triangle_pos >= section_length) {
-    triangle_pos = (section_length * 2) - triangle_pos - 1;
-  }
-
-  freq = freq_lo +
-         ((freq_hi - freq_lo) * triangle_pos) / (section_length - 1);
   /* phase_step = (freq * 256) / sample_rate, scaled by 256 for sub-integer
      precision (phase_accum is therefore in units of 1/256 of a table entry) */
   phase_step = (freq * 256 * 256) / AUDIO_SAMPLE_RATE;
