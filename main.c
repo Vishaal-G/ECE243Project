@@ -24,11 +24,13 @@
 #define CAR_TO_CAR_RADIUS 16.0f
 #define POLICE_PLAYER_HIT_RADIUS 13.0f
 #define CASH_PICKUP_RADIUS 18.0f
+#define SPEED_BOOST_PICKUP_RADIUS 18.0f
 
 #define PI 3.14159265f
 #define FRAME_RATE 60
-#define MAX_LIVES 5
+#define MAX_LIVES 10
 #define POLICE_FREEZE_FRAMES 70
+#define SPEED_BOOST_FRAMES (FRAME_RATE * 5)
 
 #define BLACK 0x0000
 #define WHITE 0xFFFF
@@ -39,6 +41,7 @@
 #define DARK_GRAY 0x4208
 #define LIGHT_GRAY 0xC618
 #define YELLOW 0xFFE0
+#define CYAN 0x07FF
 #define BROWN 0x79E0
 #define DARK_GREEN 0x3666
 
@@ -78,6 +81,7 @@ short int Buffer2[240][512];
 
 static TileType world_map[MAP_ROWS][MAP_COLS];
 static bool cash_pickups[MAP_ROWS][MAP_COLS];
+static bool speed_boost_pickups[MAP_ROWS][MAP_COLS];
 static int chase_distance_map[MAP_ROWS][MAP_COLS];
 static int chase_map_player_col = -1;
 static int chase_map_player_row = -1;
@@ -92,6 +96,7 @@ static int score = 0;
 static int best_score = 0;
 static int player_lives = MAX_LIVES;
 static int police_freeze_frames = 0;
+static int speed_boost_frames = 0;
 
 static bool key_w = false;
 static bool key_s = false;
@@ -103,18 +108,20 @@ static bool extended_code = false;
 
 static unsigned int rng_state = 0x12345678u;
 
-static const float accel_forward = 0.36f;
-static const float accel_reverse = 0.20f;
+static const float accel_forward = 0.28f;
+static const float accel_reverse = 0.16f;
 static const float grass_drag = 0.94f;
 static const float road_drag = 0.985f;
 static const float idle_drag = 0.985f;
 static const float brake_drag = 0.88f;
-static const float max_forward_speed = 6.6f;
-static const float max_reverse_speed = -3.0f;
+static const float max_forward_speed = 4.6f;
+static const float max_reverse_speed = -2.2f;
 static const float turn_rate = 0.042f;
-static const float police_accel = 0.30f;
+static const float speed_boost_accel_scale = 1.30f;
+static const float speed_boost_speed_scale = 1.45f;
+static const float police_accel = 0.22f;
 static const float police_drag = 0.97f;
-static const float police_max_speed = 6.8f;
+static const float police_max_speed = 5.0f;
 static const float police_turn_rate = 0.090f;
 
 void init_buffers(void);
@@ -142,6 +149,7 @@ void update_score_display(void);
 void update_lives_display(void);
 unsigned char encode_hex_digit(int digit);
 bool pickup_can_spawn_at(int col, int row);
+bool speed_boost_can_spawn_at(int col, int row);
 
 void reset_player(void);
 void reset_player_status(void);
@@ -708,11 +716,13 @@ void reset_cash_pickups(void) {
   int col;
 
   score = 0;
+  speed_boost_frames = 0;
 
-  // Clear all cash pickups from the map
+  // Clear all pickups from the map
   for (row = 0; row < MAP_ROWS; row++) {
     for (col = 0; col < MAP_COLS; col++) {
       cash_pickups[row][col] = false;
+      speed_boost_pickups[row][col] = false;
     }
   }
 
@@ -725,11 +735,20 @@ void reset_cash_pickups(void) {
     }
   }
 
+  for (row = 0; row < MAP_ROWS; row++) {
+    for (col = 0; col < MAP_COLS; col++) {
+      if (speed_boost_can_spawn_at(col, row) && (rand_u32() % 100u) < 10u) {
+        speed_boost_pickups[row][col] = true;
+      }
+    }
+  }
+
   cash_pickups[1][1] = false;
+  speed_boost_pickups[1][1] = false;
   update_score_display();
 }
 
-// Check if cash can spawn at specified location
+// Check if a regular pickup can spawn at specified location
 bool pickup_can_spawn_at(int col, int row) {
   int check_row;
   int check_col;
@@ -752,6 +771,39 @@ bool pickup_can_spawn_at(int col, int row) {
       if (cash_pickups[check_row][check_col]) {
         return false;
       }
+
+      if (speed_boost_pickups[check_row][check_col]) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+bool speed_boost_can_spawn_at(int col, int row) {
+  int check_row;
+  int check_col;
+
+  if (!is_road_tile(col, row)) {
+    return false;
+  }
+
+  if (row <= 3 && col <= 3) {
+    return false;
+  }
+
+  for (check_row = row - 2; check_row <= row + 2; check_row++) {
+    for (check_col = col - 2; check_col <= col + 2; check_col++) {
+      if (check_row < 0 || check_col < 0 || check_row >= MAP_ROWS ||
+          check_col >= MAP_COLS) {
+        continue;
+      }
+
+      if (cash_pickups[check_row][check_col] ||
+          speed_boost_pickups[check_row][check_col]) {
+        return false;
+      }
     }
   }
 
@@ -770,6 +822,7 @@ void reset_player(void) {
 void reset_player_status(void) {
   player_lives = MAX_LIVES;
   police_freeze_frames = 0;
+  speed_boost_frames = 0;
   reset_police_targets();
   update_lives_display();
 }
@@ -1271,6 +1324,10 @@ void update_timers(void) {
       }
     }
   }
+
+  if (speed_boost_frames > 0) {
+    speed_boost_frames--;
+  }
 }
 
 // Increase police chase strength as the score grows
@@ -1307,7 +1364,7 @@ void collect_cash_pickups(void) {
       float dx;
       float dy;
 
-      if (!cash_pickups[row][col]) {
+      if (!cash_pickups[row][col] && !speed_boost_pickups[row][col]) {
         continue;
       }
 
@@ -1317,9 +1374,16 @@ void collect_cash_pickups(void) {
       dy = player.y - pickup_y;
 
       if (dx * dx + dy * dy <= CASH_PICKUP_RADIUS * CASH_PICKUP_RADIUS) {
-        cash_pickups[row][col] = false;
-        score++;
-        score_changed = true;
+        if (cash_pickups[row][col]) {
+          cash_pickups[row][col] = false;
+          score++;
+          score_changed = true;
+        }
+
+        if (speed_boost_pickups[row][col]) {
+          speed_boost_pickups[row][col] = false;
+          speed_boost_frames = SPEED_BOOST_FRAMES;
+        }
       }
     }
   }
@@ -1337,6 +1401,8 @@ void update_player(void) {
   float old_x = player.x;
   float old_y = player.y;
   float old_speed = player.speed;
+  float current_accel_forward = accel_forward;
+  float current_max_forward_speed = max_forward_speed;
   float traction = (get_tile_at_world(player.x, player.y) == TILE_GRASS)
                        ? grass_drag
                        : road_drag;
@@ -1344,6 +1410,11 @@ void update_player(void) {
   float dy;
   float next_x;
   float next_y;
+
+  if (speed_boost_frames > 0) {
+    current_accel_forward *= speed_boost_accel_scale;
+    current_max_forward_speed *= speed_boost_speed_scale;
+  }
 
   if (key_a) {
     player.angle += turn_rate * (0.4f + fabsf(player.speed));
@@ -1360,7 +1431,7 @@ void update_player(void) {
   }
 
   if (key_w) {
-    player.speed += accel_forward;
+    player.speed += current_accel_forward;
   }
 
   if (key_s) {
@@ -1380,7 +1451,7 @@ void update_player(void) {
 
   player.speed *= traction;
   player.speed =
-      clamp_float(player.speed, max_reverse_speed, max_forward_speed);
+      clamp_float(player.speed, max_reverse_speed, current_max_forward_speed);
 
   dx = cosf(player.angle) * player.speed;
   dy = -sinf(player.angle) * player.speed;
@@ -1985,9 +2056,23 @@ void draw_health_bar(void) {
   const int panel_h = bar_h + (padding * 2) + (border * 2);
   const int bar_x = panel_x + border + padding;
   const int bar_y = panel_y + border + padding;
+  const int boost_panel_x = panel_x + panel_w + 10;
+  const int boost_panel_y = panel_y;
+  const int boost_panel_w = 86;
+  const int boost_panel_h = panel_h;
+  const int boost_label_x = boost_panel_x + 4;
+  const int boost_label_y = boost_panel_y + 3;
+  const int boost_number_x = boost_panel_x + 68;
+  const int boost_bar_x = boost_panel_x + 4;
+  const int boost_bar_y = boost_panel_y + 13;
+  const int boost_bar_w = 76;
+  const int boost_bar_h = 4;
+  int boost_seconds_left = (speed_boost_frames + FRAME_RATE - 1) / FRAME_RATE;
+  int boost_fill_w = (boost_bar_w * speed_boost_frames) / SPEED_BOOST_FRAMES;
   int segment;
   short int border_color = WHITE;
   short int fill_color = GREEN;
+  short int boost_color = (speed_boost_frames > 0) ? CYAN : DARK_GRAY;
 
   if (player_lives <= 2) {
     fill_color = RED;
@@ -2011,6 +2096,20 @@ void draw_health_bar(void) {
 
     draw_rect(segment_x, bar_y, segment_w, bar_h, segment_color);
   }
+
+  draw_rect(boost_panel_x, boost_panel_y, boost_panel_w, boost_panel_h, BLACK);
+  draw_rect(boost_panel_x, boost_panel_y, boost_panel_w, 1, boost_color);
+  draw_rect(boost_panel_x, boost_panel_y + boost_panel_h - 1, boost_panel_w, 1,
+            boost_color);
+  draw_rect(boost_panel_x, boost_panel_y, 1, boost_panel_h, boost_color);
+  draw_rect(boost_panel_x + boost_panel_w - 1, boost_panel_y, 1, boost_panel_h,
+            boost_color);
+  draw_text(boost_label_x, boost_label_y, "BOOST:", 1, WHITE);
+  draw_number(boost_number_x, boost_label_y, boost_seconds_left, 1, boost_color);
+  draw_rect(boost_bar_x, boost_bar_y, boost_bar_w, boost_bar_h, DARK_GRAY);
+  if (boost_fill_w > 0) {
+    draw_rect(boost_bar_x, boost_bar_y, boost_fill_w, boost_bar_h, boost_color);
+  }
 }
 
 // Draw a single tile at the specified column and row, with the top-left corner
@@ -2033,8 +2132,14 @@ void draw_tile(int col, int row, int screen_x, int screen_y) {
   if (tile == TILE_BUILDING) {
     draw_rect(screen_x + 4, screen_y + 4, TILE_SIZE - 8, TILE_SIZE - 8,
               DARK_GRAY);
-  } else if (tile == TILE_ROAD && cash_pickups[row][col]) {
-    draw_rect(screen_x + 13, screen_y + 13, 6, 6, YELLOW);
+  } else if (tile == TILE_ROAD) {
+    if (cash_pickups[row][col]) {
+      draw_rect(screen_x + 13, screen_y + 13, 6, 6, YELLOW);
+    }
+
+    if (speed_boost_pickups[row][col]) {
+      draw_rect(screen_x + 11, screen_y + 11, 10, 10, BLACK);
+    }
   }
 }
 
