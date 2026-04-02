@@ -120,6 +120,7 @@ static int speed_boost_frames = 0;
 /* ── siren state ─────────────────────────────────────────────────── */
 static int siren_phase_accum = 0;   /* fixed-point phase accumulator */
 static int siren_cycle_frame = 0;   /* frame position within one WEEE-UU cycle */
+static int siren_gain = 0;          /* 0..256 fade to reduce clicks */
 /* ──────────────────────────────────────────────────────────────────── */
 
 static bool key_w = false;
@@ -287,6 +288,7 @@ void init_audio(void) {
   *(audio_ptr) = 0x0;
   siren_phase_accum = 0;
   siren_cycle_frame = 0;
+  siren_gain = 0;
 }
 
 /* Return true if at least one active police car is visible on screen. */
@@ -360,23 +362,11 @@ void update_siren(void) {
   int cycle_length;
   int sweep_frame;
   int sweep_length;
+  int target_gain;
   bool playing;
 
   playing = (player_lives > 0) && any_police_on_screen();
-
-  if (!playing) {
-    /* Silence: fill the FIFO with zeros so no tone bleeds through. */
-    fifo_status = *(audio_ptr + 1);
-    free_slots  = (fifo_status >> 16) & 0xFF;   /* right channel space */
-    if (free_slots > 16) { free_slots = 16; }   /* cap writes per frame */
-    for (n = 0; n < free_slots; n++) {
-      *(audio_ptr + 2) = 0;   /* left  */
-      *(audio_ptr + 3) = 0;   /* right */
-    }
-    siren_phase_accum = 0;
-    siren_cycle_frame = 0;
-    return;
-  }
+  target_gain = playing ? 256 : 0;
 
   cycle_length = SIREN_RISE_FRAMES + SIREN_FALL_FRAMES;
   if (siren_cycle_frame < SIREN_RISE_FRAMES) {
@@ -402,10 +392,23 @@ void update_siren(void) {
   if (free_slots > 64) { free_slots = 64; }  /* cap to avoid hogging CPU */
 
   for (n = 0; n < free_slots; n++) {
+    if (siren_gain < target_gain) {
+      siren_gain += 4;
+      if (siren_gain > target_gain) {
+        siren_gain = target_gain;
+      }
+    } else if (siren_gain > target_gain) {
+      siren_gain -= 4;
+      if (siren_gain < target_gain) {
+        siren_gain = target_gain;
+      }
+    }
+
     /* Look up sine value using upper 8 bits of the 16-bit phase accumulator */
     sample_raw = sin_table[(siren_phase_accum >> 8) & 0xFF];
     /* Scale to 32-bit audio range */
     sample_32  = sample_raw * (SIREN_AMPLITUDE >> 7);
+    sample_32  = (sample_32 * siren_gain) / 256;
 
     *(audio_ptr + 2) = sample_32;   /* left  channel */
     *(audio_ptr + 3) = sample_32;   /* right channel */
@@ -413,9 +416,11 @@ void update_siren(void) {
     siren_phase_accum = (siren_phase_accum + phase_step) & 0xFFFF;
   }
 
-  siren_cycle_frame++;
-  if (siren_cycle_frame >= cycle_length) {
-    siren_cycle_frame = 0;
+  if (playing || siren_gain > 0) {
+    siren_cycle_frame++;
+    if (siren_cycle_frame >= cycle_length) {
+      siren_cycle_frame = 0;
+    }
   }
 }
 
