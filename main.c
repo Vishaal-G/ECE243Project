@@ -79,6 +79,8 @@ short int Buffer2[240][512];
 static TileType world_map[MAP_ROWS][MAP_COLS];
 static bool cash_pickups[MAP_ROWS][MAP_COLS];
 static int chase_distance_map[MAP_ROWS][MAP_COLS];
+static int chase_map_player_col = -1;
+static int chase_map_player_row = -1;
 
 static Player player;
 static PoliceCar police_cars[MAX_POLICE_CARS];
@@ -101,19 +103,19 @@ static bool extended_code = false;
 
 static unsigned int rng_state = 0x12345678u;
 
-static const float accel_forward = 0.42f;
-static const float accel_reverse = 0.24f;
+static const float accel_forward = 0.36f;
+static const float accel_reverse = 0.20f;
 static const float grass_drag = 0.94f;
 static const float road_drag = 0.985f;
 static const float idle_drag = 0.985f;
 static const float brake_drag = 0.88f;
-static const float max_forward_speed = 7.5f;
-static const float max_reverse_speed = -3.6f;
-static const float turn_rate = 0.050f;
-static const float police_accel = 0.35f;
+static const float max_forward_speed = 6.6f;
+static const float max_reverse_speed = -3.0f;
+static const float turn_rate = 0.042f;
+static const float police_accel = 0.30f;
 static const float police_drag = 0.97f;
-static const float police_max_speed = 7.5f;
-static const float police_turn_rate = 0.060f;
+static const float police_max_speed = 6.8f;
+static const float police_turn_rate = 0.090f;
 
 void init_buffers(void);
 void wait_for_vsync(void);
@@ -274,10 +276,11 @@ void clear_screen(short int color) {
   int y;
   int x;
 
-  // Loop through each pixel and set it to the specified color
   for (y = 0; y < SCREEN_H; y++) {
+    volatile short int* row_addr =
+        (volatile short int*)(pixel_buffer_start + (y << 10));
     for (x = 0; x < SCREEN_W; x++) {
-      plot_pixel(x, y, color);
+      row_addr[x] = color;
     }
   }
 }
@@ -289,12 +292,13 @@ void draw_rect(int x, int y, int width, int height, short int color) {
   int end_x = clamp_int(x + width, 0, SCREEN_W);
   int end_y = clamp_int(y + height, 0, SCREEN_H);
   int row;
-  int col;
 
-  // Loop through the rectangle area and plot each pixel
   for (row = start_y; row < end_y; row++) {
+    volatile short int* row_addr =
+        (volatile short int*)(pixel_buffer_start + (row << 10));
+    int col;
     for (col = start_x; col < end_x; col++) {
-      plot_pixel(col, row, color);
+      row_addr[col] = color;
     }
   }
 }
@@ -1016,6 +1020,13 @@ void update_chase_distance_map(void) {
   int row;
   int col;
 
+  if (start_col == chase_map_player_col && start_row == chase_map_player_row) {
+    return;
+  }
+
+  chase_map_player_col = start_col;
+  chase_map_player_row = start_row;
+
   for (row = 0; row < MAP_ROWS; row++) {
     for (col = 0; col < MAP_COLS; col++) {
       chase_distance_map[row][col] = -1;
@@ -1270,7 +1281,7 @@ void get_police_difficulty(float* accel, float* drag, float* max_speed,
   *accel = police_accel + 0.18f * difficulty;
   *drag = police_drag + 0.015f * difficulty;
   *max_speed = police_max_speed + 2.5f * difficulty;
-  *turn_rate = police_turn_rate + 0.030f * difficulty;
+  *turn_rate = police_turn_rate + 0.050f * difficulty;
   *lead_scale = 8.0f + 16.0f * difficulty;
 }
 
@@ -1495,6 +1506,8 @@ void update_single_police_car(int index) {
   while (angle_diff < -PI) {
     angle_diff += 2.0f * PI;
   }
+
+  chase_turn_rate *= 1.0f + 0.55f * clamp_float(fabsf(angle_diff) / PI, 0.0f, 1.0f);
 
   if (angle_diff > chase_turn_rate) {
     angle_diff = chase_turn_rate;
@@ -2018,12 +2031,8 @@ void draw_tile(int col, int row, int screen_x, int screen_y) {
   draw_rect(screen_x, screen_y, TILE_SIZE, TILE_SIZE, fill);
 
   if (tile == TILE_BUILDING) {
-    draw_rect(screen_x + 3, screen_y + 3, TILE_SIZE - 6, TILE_SIZE - 6, BLUE);
-    draw_rect(screen_x + 8, screen_y + 8, 5, 5, LIGHT_GRAY);
-  } else if (tile == TILE_BORDER) {
-    draw_rect(screen_x + 4, screen_y + 4, TILE_SIZE - 8, TILE_SIZE - 8, WHITE);
-  } else if (tile == TILE_GRASS) {
-    draw_rect(screen_x + 10, screen_y + 10, 4, 4, GREEN);
+    draw_rect(screen_x + 4, screen_y + 4, TILE_SIZE - 8, TILE_SIZE - 8,
+              DARK_GRAY);
   } else if (tile == TILE_ROAD && cash_pickups[row][col]) {
     draw_rect(screen_x + 13, screen_y + 13, 6, 6, BLACK);
   }
