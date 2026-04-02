@@ -21,6 +21,7 @@
 #define CAR_WIDTH 20.0f
 #define CAR_LENGTH 30.0f
 #define CAR_COLLISION_RADIUS 9.0f
+#define PLAYER_COLLISION_RADIUS 7.0f
 #define CAR_TO_CAR_RADIUS 16.0f
 #define POLICE_PLAYER_HIT_RADIUS 13.0f
 #define CASH_PICKUP_RADIUS 18.0f
@@ -164,6 +165,7 @@ void update_key_state(unsigned char scan, bool pressed);
 bool is_blocking_tile(int col, int row);
 TileType get_tile_at_world(float world_x, float world_y);
 bool check_collision(float next_x, float next_y);
+bool check_player_collision(float next_x, float next_y);
 bool is_road_tile(int col, int row);
 bool has_line_of_sight(float start_x, float start_y, float end_x, float end_y);
 void update_chase_distance_map(void);
@@ -1032,6 +1034,25 @@ bool check_collision(float next_x, float next_y) {
   return false;
 }
 
+bool check_player_collision(float next_x, float next_y) {
+  int min_col = (int)((next_x - PLAYER_COLLISION_RADIUS) / TILE_SIZE);
+  int max_col = (int)((next_x + PLAYER_COLLISION_RADIUS) / TILE_SIZE);
+  int min_row = (int)((next_y - PLAYER_COLLISION_RADIUS) / TILE_SIZE);
+  int max_row = (int)((next_y + PLAYER_COLLISION_RADIUS) / TILE_SIZE);
+  int row;
+  int col;
+
+  for (row = min_row; row <= max_row; row++) {
+    for (col = min_col; col <= max_col; col++) {
+      if (is_blocking_tile(col, row)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 bool has_line_of_sight(float start_x, float start_y, float end_x, float end_y) {
   float dx = end_x - start_x;
   float dy = end_y - start_y;
@@ -1458,19 +1479,19 @@ void update_player(void) {
   next_x = player.x + dx;
   next_y = player.y + dy;
 
-  if (!check_collision(next_x, player.y)) {
+  if (!check_player_collision(next_x, player.y)) {
     player.x = next_x;
   } else {
     player.speed = old_speed * -0.2f;
   }
 
-  if (!check_collision(player.x, next_y)) {
+  if (!check_player_collision(player.x, next_y)) {
     player.y = next_y;
   } else {
     player.speed = old_speed * -0.2f;
   }
 
-  if (check_collision(player.x, player.y)) {
+  if (check_player_collision(player.x, player.y)) {
     player.x = old_x;
     player.y = old_y;
     player.speed = 0.0f;
