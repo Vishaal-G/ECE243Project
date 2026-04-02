@@ -27,7 +27,7 @@
 
 #define PI 3.14159265f
 #define FRAME_RATE 60
-#define MAX_LIVES 10
+#define MAX_LIVES 5
 #define POLICE_FREEZE_FRAMES 70
 
 #define BLACK 0x0000
@@ -1989,9 +1989,9 @@ void draw_health_bar(void) {
   short int border_color = WHITE;
   short int fill_color = GREEN;
 
-  if (player_lives <= 3) {
+  if (player_lives <= 2) {
     fill_color = RED;
-  } else if (player_lives <= 6) {
+  } else if (player_lives < MAX_LIVES) {
     fill_color = YELLOW;
   }
 
@@ -2034,7 +2034,7 @@ void draw_tile(int col, int row, int screen_x, int screen_y) {
     draw_rect(screen_x + 4, screen_y + 4, TILE_SIZE - 8, TILE_SIZE - 8,
               DARK_GRAY);
   } else if (tile == TILE_ROAD && cash_pickups[row][col]) {
-    draw_rect(screen_x + 13, screen_y + 13, 6, 6, BLACK);
+    draw_rect(screen_x + 13, screen_y + 13, 6, 6, YELLOW);
   }
 }
 
