@@ -1,7 +1,7 @@
 INSTALL	:= C:/intelFPGA/QUARTUS_Lite_V23.1
 
 MAIN	:= main.c
-HDRS	:= address_map.h
+HDRS	:= address_map.h siren_data.h
 SRCS	:= $(MAIN)
 
 SHELL	:= cmd.exe
