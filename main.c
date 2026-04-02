@@ -3,8 +3,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "siren_data.h"
-
 #define PIXEL_BUF_CTRL_BASE 0xFF203020
 #define PS2_BASE 0xFF200100
 #define LEDR_BASE 0xFF200000
@@ -40,10 +38,10 @@
    The siren alternates between two tones (wail hi/lo) every SIREN_HALF_PERIOD
    frames.  Each frame we push as many samples as the FIFO can hold. */
 #define AUDIO_SAMPLE_RATE 8000
-#define SIREN_HALF_PERIOD_FRAMES 30 /* 0.5 s per half-wail at 60 fps */
-#define SIREN_FREQ_HI 1200          /* Hz */
-#define SIREN_FREQ_LO 800           /* Hz */
-#define SIREN_AMPLITUDE 0x06000000  /* keep below 0x07FFFFFF to avoid clip */
+#define SIREN_HALF_PERIOD_FRAMES 30   /* 0.5 s per half-wail at 60 fps */
+#define SIREN_FREQ_HI 1200            /* Hz */
+#define SIREN_FREQ_LO  800            /* Hz */
+#define SIREN_AMPLITUDE 0x06000000    /* keep below 0x07FFFFFF to avoid clip */
 
 #define BLACK 0x0000
 #define WHITE 0xFFFF
@@ -90,8 +88,9 @@ volatile int* HEX5_HEX4_ptr = (int*)HEX5_HEX4_BASE;
 
 /* Audio core registers (DE1-SoC / Altera University IP)
    Offset 0 : Control  (read: RAVAIL/WSPACE, write: clear IRQ)
-   Offset 1 : FIFO status  (bits [23:16] = right write space, [7:0] = left write
-   space) Offset 2 : Left  data (write) Offset 3 : Right data (write) */
+   Offset 1 : FIFO status  (bits [23:16] = right write space, [7:0] = left write space)
+   Offset 2 : Left  data (write)
+   Offset 3 : Right data (write) */
 volatile int* audio_ptr = (int*)AUDIO_BASE;
 
 volatile int pixel_buffer_start;
@@ -118,8 +117,9 @@ static int police_freeze_frames = 0;
 static int speed_boost_frames = 0;
 
 /* ── siren state ─────────────────────────────────────────────────── */
-static unsigned int siren_sample_pos = 0;
-static unsigned int siren_total_samples = 0;
+static int  siren_phase_accum    = 0;   /* fixed-point phase: 0..AUDIO_SAMPLE_RATE */
+static int  siren_half_frame_cnt = 0;   /* counts frames in current half-period   */
+static bool siren_hi_tone        = true;/* which tone we are on right now          */
 /* ──────────────────────────────────────────────────────────────────── */
 
 static bool key_w = false;
@@ -277,15 +277,17 @@ int main(void) {
   return 0;
 }
 
-// ── Audio helpers
-// ─────────────────────────────────────────────────────────────
+// ── Audio helpers ─────────────────────────────────────────────────────────────
 
 /* Clear the audio core FIFOs and ensure it is in a known state. */
 void init_audio(void) {
-  *(audio_ptr) = 0x8;
+  /* Writing 1 to bit 2 (CW) and bit 3 (CR) of the control register clears
+     the write and read FIFOs respectively on the Altera University audio core. */
+  *(audio_ptr) = 0x8;   /* clear write FIFO */
   *(audio_ptr) = 0x0;
-  siren_total_samples = siren_raw_len / 2; /* 2 bytes per 16-bit sample */
-  siren_sample_pos = 0;
+  siren_phase_accum    = 0;
+  siren_half_frame_cnt = 0;
+  siren_hi_tone        = true;
 }
 
 /* Return true if at least one active police car is visible on screen. */
@@ -326,39 +328,82 @@ bool any_police_on_screen(void) {
  * We fill however many slots are free this frame.
  */
 void update_siren(void) {
-  short int* samples = (short int*)siren_raw;
-  int fifo_status;
+  /* 256-entry sine table, values in [-127, 127] */
+  static const signed char sin_table[256] = {
+      0,   3,   6,   9,  12,  15,  18,  21,  24,  27,  30,  33,  36,  39,
+     42,  45,  48,  51,  54,  57,  59,  62,  65,  67,  70,  73,  75,  78,
+     80,  82,  85,  87,  89,  91,  94,  96,  98, 100, 102, 103, 105, 107,
+    108, 110, 112, 113, 114, 116, 117, 118, 119, 120, 121, 122, 123, 123,
+    124, 125, 125, 126, 126, 126, 127, 127, 127, 127, 127, 127, 127, 126,
+    126, 126, 125, 125, 124, 123, 123, 122, 121, 120, 119, 118, 117, 116,
+    114, 113, 112, 110, 108, 107, 105, 103, 102, 100,  98,  96,  94,  91,
+     89,  87,  85,  82,  80,  78,  75,  73,  70,  67,  65,  62,  59,  57,
+     54,  51,  48,  45,  42,  39,  36,  33,  30,  27,  24,  21,  18,  15,
+     12,   9,   6,   3,   0,  -3,  -6,  -9, -12, -15, -18, -21, -24, -27,
+    -30, -33, -36, -39, -42, -45, -48, -51, -54, -57, -59, -62, -65, -67,
+    -70, -73, -75, -78, -80, -82, -85, -87, -89, -91, -94, -96, -98,-100,
+   -102,-103,-105,-107,-108,-110,-112,-113,-114,-116,-117,-118,-119,-120,
+   -121,-122,-123,-123,-124,-125,-125,-126,-126,-126,-127,-127,-127,-127,
+   -127,-127,-127,-126,-126,-126,-125,-125,-124,-123,-123,-122,-121,-120,
+   -119,-118,-117,-116,-114,-113,-112,-110,-108,-107,-105,-103,-102,-100,
+    -98, -96, -94, -91, -89, -87, -85, -82, -80, -78, -75, -73, -70, -67,
+    -65, -62, -59, -57, -54, -51, -48, -45, -42, -39, -36, -33, -30, -27,
+    -24, -21, -18, -15, -12,  -9,  -6,  -3
+  };
+
   int free_slots;
-  int n;
+  int fifo_status;
+  int freq;
+  int phase_step;
+  int sample_raw;
   int sample_32;
+  int n;
   bool playing;
 
   playing = (player_lives > 0) && any_police_on_screen();
 
-  fifo_status = *(audio_ptr + 1);
-  free_slots = (fifo_status >> 16) & 0xFF;
-  if (free_slots > 64) {
-    free_slots = 64;
-  }
-
   if (!playing) {
+    /* Silence: fill the FIFO with zeros so no tone bleeds through. */
+    fifo_status = *(audio_ptr + 1);
+    free_slots  = (fifo_status >> 16) & 0xFF;   /* right channel space */
+    if (free_slots > 16) { free_slots = 16; }   /* cap writes per frame */
     for (n = 0; n < free_slots; n++) {
-      *(audio_ptr + 2) = 0;
-      *(audio_ptr + 3) = 0;
+      *(audio_ptr + 2) = 0;   /* left  */
+      *(audio_ptr + 3) = 0;   /* right */
     }
-    siren_sample_pos = 0;
+    siren_phase_accum    = 0;
+    siren_half_frame_cnt = 0;
+    siren_hi_tone        = true;
     return;
   }
 
-  for (n = 0; n < free_slots; n++) {
-    sample_32 = ((int)samples[siren_sample_pos]) << 14;
-    *(audio_ptr + 2) = sample_32; /* left  channel */
-    *(audio_ptr + 3) = sample_32; /* right channel */
+  /* Advance the half-period counter to alternate between hi and lo tones. */
+  siren_half_frame_cnt++;
+  if (siren_half_frame_cnt >= SIREN_HALF_PERIOD_FRAMES) {
+    siren_half_frame_cnt = 0;
+    siren_hi_tone        = !siren_hi_tone;
+  }
 
-    siren_sample_pos++;
-    if (siren_sample_pos >= siren_total_samples) {
-      siren_sample_pos = 0; /* loop seamlessly */
-    }
+  freq       = siren_hi_tone ? SIREN_FREQ_HI : SIREN_FREQ_LO;
+  /* phase_step = (freq * 256) / sample_rate, scaled by 256 for sub-integer
+     precision (phase_accum is therefore in units of 1/256 of a table entry) */
+  phase_step = (freq * 256 * 256) / AUDIO_SAMPLE_RATE;
+
+  /* How many FIFO slots are free this frame? */
+  fifo_status = *(audio_ptr + 1);
+  free_slots  = (fifo_status >> 16) & 0xFF;
+  if (free_slots > 64) { free_slots = 64; }  /* cap to avoid hogging CPU */
+
+  for (n = 0; n < free_slots; n++) {
+    /* Look up sine value using upper 8 bits of the 16-bit phase accumulator */
+    sample_raw = sin_table[(siren_phase_accum >> 8) & 0xFF];
+    /* Scale to 32-bit audio range */
+    sample_32  = sample_raw * (SIREN_AMPLITUDE >> 7);
+
+    *(audio_ptr + 2) = sample_32;   /* left  channel */
+    *(audio_ptr + 3) = sample_32;   /* right channel */
+
+    siren_phase_accum = (siren_phase_accum + phase_step) & 0xFFFF;
   }
 }
 
@@ -1673,8 +1718,7 @@ void update_single_police_car(int index) {
         int next_row = police_row + step_row;
         int next_distance;
 
-        if ((step_col == 0 && step_row == 0) ||
-            (step_col != 0 && step_row != 0)) {
+        if ((step_col == 0 && step_row == 0) || (step_col != 0 && step_row != 0)) {
           continue;
         }
 
@@ -1719,8 +1763,7 @@ void update_single_police_car(int index) {
     angle_diff += 2.0f * PI;
   }
 
-  chase_turn_rate *=
-      1.0f + 0.55f * clamp_float(fabsf(angle_diff) / PI, 0.0f, 1.0f);
+  chase_turn_rate *= 1.0f + 0.55f * clamp_float(fabsf(angle_diff) / PI, 0.0f, 1.0f);
 
   if (angle_diff > chase_turn_rate) {
     angle_diff = chase_turn_rate;
@@ -2247,8 +2290,7 @@ void draw_health_bar(void) {
   draw_rect(boost_panel_x + boost_panel_w - 1, boost_panel_y, 1, boost_panel_h,
             boost_color);
   draw_text(boost_label_x, boost_label_y, "BOOST:", 1, WHITE);
-  draw_number(boost_number_x, boost_label_y, boost_seconds_left, 1,
-              boost_color);
+  draw_number(boost_number_x, boost_label_y, boost_seconds_left, 1, boost_color);
   draw_rect(boost_bar_x, boost_bar_y, boost_bar_w, boost_bar_h, DARK_GRAY);
   if (boost_fill_w > 0) {
     draw_rect(boost_bar_x, boost_bar_y, boost_fill_w, boost_bar_h, boost_color);
