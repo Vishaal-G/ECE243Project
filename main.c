@@ -38,10 +38,10 @@
    The siren uses a classic repeating "WEEE-UU" sweep: a longer rising glide
    followed by a shorter falling glide. */
 #define AUDIO_SAMPLE_RATE 8000
-#define SIREN_RISE_FRAMES 42
-#define SIREN_FALL_FRAMES 22
-#define SIREN_FREQ_LOW 680
-#define SIREN_FREQ_HIGH 1280
+#define SIREN_RISE_FRAMES 32
+#define SIREN_FALL_FRAMES 16
+#define SIREN_FREQ_LOW 860
+#define SIREN_FREQ_HIGH 1560
 #define SIREN_AMPLITUDE 0x06000000    /* keep below 0x07FFFFFF to avoid clip */
 
 #define BLACK 0x0000
