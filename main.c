@@ -4,11 +4,11 @@
 #include <stdlib.h>
 
 #define PIXEL_BUF_CTRL_BASE 0xFF203020
-#define AUDIO_BASE 0xFF203040
 #define PS2_BASE 0xFF200100
 #define LEDR_BASE 0xFF200000
 #define HEX3_HEX0_BASE 0xFF200020
 #define HEX5_HEX4_BASE 0xFF200030
+#define AUDIO_BASE 0xFF203040
 
 #define SCREEN_W 320
 #define SCREEN_H 240
@@ -26,11 +26,22 @@
 #define CAR_TO_CAR_RADIUS 16.0f
 #define POLICE_PLAYER_HIT_RADIUS 13.0f
 #define CASH_PICKUP_RADIUS 18.0f
+#define SPEED_BOOST_PICKUP_RADIUS 18.0f
 
 #define PI 3.14159265f
 #define FRAME_RATE 60
-#define MAX_LIVES 5
+#define MAX_LIVES 10
 #define POLICE_FREEZE_FRAMES 70
+#define SPEED_BOOST_FRAMES (FRAME_RATE * 5)
+
+/* Audio sample rate assumed 8000 Hz (standard for DE1-SoC audio core).
+   The siren alternates between two tones (wail hi/lo) every SIREN_HALF_PERIOD
+   frames.  Each frame we push as many samples as the FIFO can hold. */
+#define AUDIO_SAMPLE_RATE 8000
+#define SIREN_HALF_PERIOD_FRAMES 30   /* 0.5 s per half-wail at 60 fps */
+#define SIREN_FREQ_HI 1200            /* Hz */
+#define SIREN_FREQ_LO  800            /* Hz */
+#define SIREN_AMPLITUDE 0x06000000    /* keep below 0x07FFFFFF to avoid clip */
 
 #define BLACK 0x0000
 #define WHITE 0xFFFF
@@ -41,6 +52,7 @@
 #define DARK_GRAY 0x4208
 #define LIGHT_GRAY 0xC618
 #define YELLOW 0xFFE0
+#define CYAN 0x07FF
 #define BROWN 0x79E0
 #define DARK_GREEN 0x3666
 
@@ -69,11 +81,17 @@ typedef struct {
 } PoliceCar;
 
 volatile int* pixel_ctrl_ptr = (int*)PIXEL_BUF_CTRL_BASE;
-volatile int* audio_ptr = (int*)AUDIO_BASE;
 volatile int* PS2_ptr = (int*)PS2_BASE;
 volatile int* LEDR_ptr = (int*)LEDR_BASE;
 volatile int* HEX3_HEX0_ptr = (int*)HEX3_HEX0_BASE;
 volatile int* HEX5_HEX4_ptr = (int*)HEX5_HEX4_BASE;
+
+/* Audio core registers (DE1-SoC / Altera University IP)
+   Offset 0 : Control  (read: RAVAIL/WSPACE, write: clear IRQ)
+   Offset 1 : FIFO status  (bits [23:16] = right write space, [7:0] = left write space)
+   Offset 2 : Left  data (write)
+   Offset 3 : Right data (write) */
+volatile int* audio_ptr = (int*)AUDIO_BASE;
 
 volatile int pixel_buffer_start;
 short int Buffer1[240][512];
@@ -81,6 +99,7 @@ short int Buffer2[240][512];
 
 static TileType world_map[MAP_ROWS][MAP_COLS];
 static bool cash_pickups[MAP_ROWS][MAP_COLS];
+static bool speed_boost_pickups[MAP_ROWS][MAP_COLS];
 static int chase_distance_map[MAP_ROWS][MAP_COLS];
 static int chase_map_player_col = -1;
 static int chase_map_player_row = -1;
@@ -95,8 +114,13 @@ static int score = 0;
 static int best_score = 0;
 static int player_lives = MAX_LIVES;
 static int police_freeze_frames = 0;
-static unsigned int siren_phase = 0u;
-static int siren_sample_counter = 0;
+static int speed_boost_frames = 0;
+
+/* ── siren state ─────────────────────────────────────────────────── */
+static int  siren_phase_accum    = 0;   /* fixed-point phase: 0..AUDIO_SAMPLE_RATE */
+static int  siren_half_frame_cnt = 0;   /* counts frames in current half-period   */
+static bool siren_hi_tone        = true;/* which tone we are on right now          */
+/* ──────────────────────────────────────────────────────────────────── */
 
 static bool key_w = false;
 static bool key_s = false;
@@ -108,19 +132,21 @@ static bool extended_code = false;
 
 static unsigned int rng_state = 0x12345678u;
 
-static const float accel_forward = 0.36f;
-static const float accel_reverse = 0.20f;
+static const float accel_forward = 0.28f;
+static const float accel_reverse = 0.16f;
 static const float grass_drag = 0.94f;
 static const float road_drag = 0.985f;
 static const float idle_drag = 0.985f;
 static const float brake_drag = 0.88f;
-static const float max_forward_speed = 6.6f;
-static const float max_reverse_speed = -3.0f;
+static const float max_forward_speed = 4.6f;
+static const float max_reverse_speed = -2.2f;
 static const float turn_rate = 0.042f;
-static const float police_accel = 0.30f;
+static const float speed_boost_accel_scale = 1.30f;
+static const float speed_boost_speed_scale = 1.45f;
+static const float police_accel = 0.16f;
 static const float police_drag = 0.97f;
-static const float police_max_speed = 6.8f;
-static const float police_turn_rate = 0.090f;
+static const float police_max_speed = 3.8f;
+static const float police_turn_rate = 0.080f;
 
 void init_buffers(void);
 void wait_for_vsync(void);
@@ -147,6 +173,7 @@ void update_score_display(void);
 void update_lives_display(void);
 unsigned char encode_hex_digit(int digit);
 bool pickup_can_spawn_at(int col, int row);
+bool speed_boost_can_spawn_at(int col, int row);
 
 void reset_player(void);
 void reset_player_status(void);
@@ -179,8 +206,6 @@ void update_player(void);
 void update_single_police_car(int index);
 void update_police_car(void);
 void update_camera(void);
-bool is_police_visible(int index);
-void update_audio(void);
 
 void draw_world(void);
 void draw_game_over_screen(void);
@@ -201,9 +226,16 @@ float clamp_float(float value, float min_value, float max_value);
 int world_to_screen_x(float world_x);
 int world_to_screen_y(float world_y);
 
+/* ── NEW: siren audio prototypes ─────────────────────────────────── */
+void init_audio(void);
+bool any_police_on_screen(void);
+void update_siren(void);
+/* ──────────────────────────────────────────────────────────────────── */
+
 // Main game loop
 int main(void) {
   init_buffers();
+  init_audio();
   seed_rng(0x24324324u);
   generate_map();
   reset_cash_pickups();
@@ -231,15 +263,148 @@ int main(void) {
     }
 
     update_camera();
-    update_audio();
     if (player_lives > 0) {
       draw_world();
     } else {
       draw_game_over_screen();
     }
+
+    /* push siren audio every frame */
+    update_siren();
+
     swap_buffers();
   }
   return 0;
+}
+
+// ── Audio helpers ─────────────────────────────────────────────────────────────
+
+/* Clear the audio core FIFOs and ensure it is in a known state. */
+void init_audio(void) {
+  /* Writing 1 to bit 2 (CW) and bit 3 (CR) of the control register clears
+     the write and read FIFOs respectively on the Altera University audio core. */
+  *(audio_ptr) = 0x8;   /* clear write FIFO */
+  *(audio_ptr) = 0x0;
+  siren_phase_accum    = 0;
+  siren_half_frame_cnt = 0;
+  siren_hi_tone        = true;
+}
+
+/* Return true if at least one active police car is visible on screen. */
+bool any_police_on_screen(void) {
+  int i;
+  int sx;
+  int sy;
+
+  for (i = 0; i < MAX_POLICE_CARS; i++) {
+    if (!police_cars[i].active) {
+      continue;
+    }
+    sx = world_to_screen_x(police_cars[i].x);
+    sy = world_to_screen_y(police_cars[i].y);
+    /* Use a generous margin so the siren starts a little before the car
+       fully enters the viewport, matching the visual impression. */
+    if (sx >= -40 && sx < SCREEN_W + 40 && sy >= -40 && sy < SCREEN_H + 40) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * update_siren() — call once per game frame.
+ *
+ * Generates a two-tone wailing siren using a simple integer sine table and
+ * writes samples directly into the DE1-SoC audio core's write FIFO.
+ *
+ * No external files are needed.  The waveform is synthesised in software
+ * using a 256-entry sine lookup table (stored in ROM / flash as a
+ * const array) and a phase accumulator that increments by
+ *   (frequency * 256) / AUDIO_SAMPLE_RATE
+ * each sample.
+ *
+ * The audio core's write FIFO status register (offset 1) holds the number
+ * of free 32-bit slots in bits [23:16] (right) and [7:0] (left).
+ * We fill however many slots are free this frame.
+ */
+void update_siren(void) {
+  /* 256-entry sine table, values in [-127, 127] */
+  static const signed char sin_table[256] = {
+      0,   3,   6,   9,  12,  15,  18,  21,  24,  27,  30,  33,  36,  39,
+     42,  45,  48,  51,  54,  57,  59,  62,  65,  67,  70,  73,  75,  78,
+     80,  82,  85,  87,  89,  91,  94,  96,  98, 100, 102, 103, 105, 107,
+    108, 110, 112, 113, 114, 116, 117, 118, 119, 120, 121, 122, 123, 123,
+    124, 125, 125, 126, 126, 126, 127, 127, 127, 127, 127, 127, 127, 126,
+    126, 126, 125, 125, 124, 123, 123, 122, 121, 120, 119, 118, 117, 116,
+    114, 113, 112, 110, 108, 107, 105, 103, 102, 100,  98,  96,  94,  91,
+     89,  87,  85,  82,  80,  78,  75,  73,  70,  67,  65,  62,  59,  57,
+     54,  51,  48,  45,  42,  39,  36,  33,  30,  27,  24,  21,  18,  15,
+     12,   9,   6,   3,   0,  -3,  -6,  -9, -12, -15, -18, -21, -24, -27,
+    -30, -33, -36, -39, -42, -45, -48, -51, -54, -57, -59, -62, -65, -67,
+    -70, -73, -75, -78, -80, -82, -85, -87, -89, -91, -94, -96, -98,-100,
+   -102,-103,-105,-107,-108,-110,-112,-113,-114,-116,-117,-118,-119,-120,
+   -121,-122,-123,-123,-124,-125,-125,-126,-126,-126,-127,-127,-127,-127,
+   -127,-127,-127,-126,-126,-126,-125,-125,-124,-123,-123,-122,-121,-120,
+   -119,-118,-117,-116,-114,-113,-112,-110,-108,-107,-105,-103,-102,-100,
+    -98, -96, -94, -91, -89, -87, -85, -82, -80, -78, -75, -73, -70, -67,
+    -65, -62, -59, -57, -54, -51, -48, -45, -42, -39, -36, -33, -30, -27,
+    -24, -21, -18, -15, -12,  -9,  -6,  -3
+  };
+
+  int free_slots;
+  int fifo_status;
+  int freq;
+  int phase_step;
+  int sample_raw;
+  int sample_32;
+  int n;
+  bool playing;
+
+  playing = (player_lives > 0) && any_police_on_screen();
+
+  if (!playing) {
+    /* Silence: fill the FIFO with zeros so no tone bleeds through. */
+    fifo_status = *(audio_ptr + 1);
+    free_slots  = (fifo_status >> 16) & 0xFF;   /* right channel space */
+    if (free_slots > 16) { free_slots = 16; }   /* cap writes per frame */
+    for (n = 0; n < free_slots; n++) {
+      *(audio_ptr + 2) = 0;   /* left  */
+      *(audio_ptr + 3) = 0;   /* right */
+    }
+    siren_phase_accum    = 0;
+    siren_half_frame_cnt = 0;
+    siren_hi_tone        = true;
+    return;
+  }
+
+  /* Advance the half-period counter to alternate between hi and lo tones. */
+  siren_half_frame_cnt++;
+  if (siren_half_frame_cnt >= SIREN_HALF_PERIOD_FRAMES) {
+    siren_half_frame_cnt = 0;
+    siren_hi_tone        = !siren_hi_tone;
+  }
+
+  freq       = siren_hi_tone ? SIREN_FREQ_HI : SIREN_FREQ_LO;
+  /* phase_step = (freq * 256) / sample_rate, scaled by 256 for sub-integer
+     precision (phase_accum is therefore in units of 1/256 of a table entry) */
+  phase_step = (freq * 256 * 256) / AUDIO_SAMPLE_RATE;
+
+  /* How many FIFO slots are free this frame? */
+  fifo_status = *(audio_ptr + 1);
+  free_slots  = (fifo_status >> 16) & 0xFF;
+  if (free_slots > 64) { free_slots = 64; }  /* cap to avoid hogging CPU */
+
+  for (n = 0; n < free_slots; n++) {
+    /* Look up sine value using upper 8 bits of the 16-bit phase accumulator */
+    sample_raw = sin_table[(siren_phase_accum >> 8) & 0xFF];
+    /* Scale to 32-bit audio range */
+    sample_32  = sample_raw * (SIREN_AMPLITUDE >> 7);
+
+    *(audio_ptr + 2) = sample_32;   /* left  channel */
+    *(audio_ptr + 3) = sample_32;   /* right channel */
+
+    siren_phase_accum = (siren_phase_accum + phase_step) & 0xFFFF;
+  }
 }
 
 // Declare double buffering functions and game logic functions
@@ -717,11 +882,13 @@ void reset_cash_pickups(void) {
   int col;
 
   score = 0;
+  speed_boost_frames = 0;
 
-  // Clear all cash pickups from the map
+  // Clear all pickups from the map
   for (row = 0; row < MAP_ROWS; row++) {
     for (col = 0; col < MAP_COLS; col++) {
       cash_pickups[row][col] = false;
+      speed_boost_pickups[row][col] = false;
     }
   }
 
@@ -734,11 +901,20 @@ void reset_cash_pickups(void) {
     }
   }
 
+  for (row = 0; row < MAP_ROWS; row++) {
+    for (col = 0; col < MAP_COLS; col++) {
+      if (speed_boost_can_spawn_at(col, row) && (rand_u32() % 100u) < 10u) {
+        speed_boost_pickups[row][col] = true;
+      }
+    }
+  }
+
   cash_pickups[1][1] = false;
+  speed_boost_pickups[1][1] = false;
   update_score_display();
 }
 
-// Check if cash can spawn at specified location
+// Check if a regular pickup can spawn at specified location
 bool pickup_can_spawn_at(int col, int row) {
   int check_row;
   int check_col;
@@ -761,6 +937,39 @@ bool pickup_can_spawn_at(int col, int row) {
       if (cash_pickups[check_row][check_col]) {
         return false;
       }
+
+      if (speed_boost_pickups[check_row][check_col]) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+bool speed_boost_can_spawn_at(int col, int row) {
+  int check_row;
+  int check_col;
+
+  if (!is_road_tile(col, row)) {
+    return false;
+  }
+
+  if (row <= 3 && col <= 3) {
+    return false;
+  }
+
+  for (check_row = row - 2; check_row <= row + 2; check_row++) {
+    for (check_col = col - 2; check_col <= col + 2; check_col++) {
+      if (check_row < 0 || check_col < 0 || check_row >= MAP_ROWS ||
+          check_col >= MAP_COLS) {
+        continue;
+      }
+
+      if (cash_pickups[check_row][check_col] ||
+          speed_boost_pickups[check_row][check_col]) {
+        return false;
+      }
     }
   }
 
@@ -779,6 +988,7 @@ void reset_player(void) {
 void reset_player_status(void) {
   player_lives = MAX_LIVES;
   police_freeze_frames = 0;
+  speed_boost_frames = 0;
   reset_police_targets();
   update_lives_display();
 }
@@ -1299,6 +1509,10 @@ void update_timers(void) {
       }
     }
   }
+
+  if (speed_boost_frames > 0) {
+    speed_boost_frames--;
+  }
 }
 
 // Increase police chase strength as the score grows
@@ -1306,10 +1520,10 @@ void get_police_difficulty(float* accel, float* drag, float* max_speed,
                            float* turn_rate, float* lead_scale) {
   float difficulty = clamp_float((float)score / 20.0f, 0.0f, 1.0f);
 
-  *accel = police_accel + 0.18f * difficulty;
-  *drag = police_drag + 0.015f * difficulty;
-  *max_speed = police_max_speed + 2.5f * difficulty;
-  *turn_rate = police_turn_rate + 0.050f * difficulty;
+  *accel = police_accel + 0.10f * difficulty;
+  *drag = police_drag + 0.010f * difficulty;
+  *max_speed = police_max_speed + 1.2f * difficulty;
+  *turn_rate = police_turn_rate + 0.030f * difficulty;
   *lead_scale = 8.0f + 16.0f * difficulty;
 }
 
@@ -1335,7 +1549,7 @@ void collect_cash_pickups(void) {
       float dx;
       float dy;
 
-      if (!cash_pickups[row][col]) {
+      if (!cash_pickups[row][col] && !speed_boost_pickups[row][col]) {
         continue;
       }
 
@@ -1345,9 +1559,16 @@ void collect_cash_pickups(void) {
       dy = player.y - pickup_y;
 
       if (dx * dx + dy * dy <= CASH_PICKUP_RADIUS * CASH_PICKUP_RADIUS) {
-        cash_pickups[row][col] = false;
-        score++;
-        score_changed = true;
+        if (cash_pickups[row][col]) {
+          cash_pickups[row][col] = false;
+          score++;
+          score_changed = true;
+        }
+
+        if (speed_boost_pickups[row][col]) {
+          speed_boost_pickups[row][col] = false;
+          speed_boost_frames = SPEED_BOOST_FRAMES;
+        }
       }
     }
   }
@@ -1365,6 +1586,8 @@ void update_player(void) {
   float old_x = player.x;
   float old_y = player.y;
   float old_speed = player.speed;
+  float current_accel_forward = accel_forward;
+  float current_max_forward_speed = max_forward_speed;
   float traction = (get_tile_at_world(player.x, player.y) == TILE_GRASS)
                        ? grass_drag
                        : road_drag;
@@ -1372,6 +1595,11 @@ void update_player(void) {
   float dy;
   float next_x;
   float next_y;
+
+  if (speed_boost_frames > 0) {
+    current_accel_forward *= speed_boost_accel_scale;
+    current_max_forward_speed *= speed_boost_speed_scale;
+  }
 
   if (key_a) {
     player.angle += turn_rate * (0.4f + fabsf(player.speed));
@@ -1388,7 +1616,7 @@ void update_player(void) {
   }
 
   if (key_w) {
-    player.speed += accel_forward;
+    player.speed += current_accel_forward;
   }
 
   if (key_s) {
@@ -1408,7 +1636,7 @@ void update_player(void) {
 
   player.speed *= traction;
   player.speed =
-      clamp_float(player.speed, max_reverse_speed, max_forward_speed);
+      clamp_float(player.speed, max_reverse_speed, current_max_forward_speed);
 
   dx = cosf(player.angle) * player.speed;
   dy = -sinf(player.angle) * player.speed;
@@ -1603,75 +1831,6 @@ void update_camera(void) {
 
   camera_x = clamp_float(camera_x, 0.0f, (float)(WORLD_W - SCREEN_W));
   camera_y = clamp_float(camera_y, 0.0f, (float)(WORLD_H - SCREEN_H));
-}
-
-bool is_police_visible(int index) {
-  float margin_x = CAR_LENGTH * 0.5f;
-  float margin_y = CAR_LENGTH * 0.5f;
-
-  if (!police_cars[index].active) {
-    return false;
-  }
-
-  return police_cars[index].x >= camera_x - margin_x &&
-         police_cars[index].x <= camera_x + SCREEN_W + margin_x &&
-         police_cars[index].y >= camera_y - margin_y &&
-         police_cars[index].y <= camera_y + SCREEN_H + margin_y;
-}
-
-void update_audio(void) {
-  const int sample_rate = 48000;
-  const int low_freq = 600;
-  const int high_freq = 900;
-  const int tone_samples = sample_rate / 4;
-  const int amplitude = 2500000;
-  int fifo_space;
-  int left_space;
-  int right_space;
-  int samples_to_write;
-  int i;
-  bool police_visible = false;
-
-  if (player_lives <= 0) {
-    siren_sample_counter = 0;
-    siren_phase = 0u;
-    return;
-  }
-
-  for (i = 0; i < MAX_POLICE_CARS; i++) {
-    if (is_police_visible(i)) {
-      police_visible = true;
-      break;
-    }
-  }
-
-  if (!police_visible) {
-    siren_sample_counter = 0;
-    siren_phase = 0u;
-    return;
-  }
-
-  fifo_space = *(audio_ptr + 1);
-  left_space = (fifo_space >> 16) & 0xFF;
-  right_space = (fifo_space >> 24) & 0xFF;
-  samples_to_write = (left_space < right_space) ? left_space : right_space;
-
-  for (i = 0; i < samples_to_write; i++) {
-    int frequency =
-        ((siren_sample_counter / tone_samples) & 1) == 0 ? low_freq : high_freq;
-    unsigned int phase_step =
-        (unsigned int)(((unsigned long long)frequency << 32) / sample_rate);
-    int sample = (siren_phase & 0x80000000u) != 0u ? amplitude : -amplitude;
-
-    *(audio_ptr + 2) = sample;
-    *(audio_ptr + 3) = sample;
-
-    siren_phase += phase_step;
-    siren_sample_counter++;
-    if (siren_sample_counter >= tone_samples * 2) {
-      siren_sample_counter = 0;
-    }
-  }
 }
 
 // Encode a single digit (0-9) as the corresponding 7-segment display code for
@@ -2082,9 +2241,23 @@ void draw_health_bar(void) {
   const int panel_h = bar_h + (padding * 2) + (border * 2);
   const int bar_x = panel_x + border + padding;
   const int bar_y = panel_y + border + padding;
+  const int boost_panel_x = panel_x + panel_w + 10;
+  const int boost_panel_y = panel_y;
+  const int boost_panel_w = 86;
+  const int boost_panel_h = panel_h;
+  const int boost_label_x = boost_panel_x + 4;
+  const int boost_label_y = boost_panel_y + 3;
+  const int boost_number_x = boost_panel_x + 68;
+  const int boost_bar_x = boost_panel_x + 4;
+  const int boost_bar_y = boost_panel_y + 13;
+  const int boost_bar_w = 76;
+  const int boost_bar_h = 4;
+  int boost_seconds_left = (speed_boost_frames + FRAME_RATE - 1) / FRAME_RATE;
+  int boost_fill_w = (boost_bar_w * speed_boost_frames) / SPEED_BOOST_FRAMES;
   int segment;
   short int border_color = WHITE;
   short int fill_color = GREEN;
+  short int boost_color = (speed_boost_frames > 0) ? CYAN : DARK_GRAY;
 
   if (player_lives <= 2) {
     fill_color = RED;
@@ -2108,6 +2281,20 @@ void draw_health_bar(void) {
 
     draw_rect(segment_x, bar_y, segment_w, bar_h, segment_color);
   }
+
+  draw_rect(boost_panel_x, boost_panel_y, boost_panel_w, boost_panel_h, BLACK);
+  draw_rect(boost_panel_x, boost_panel_y, boost_panel_w, 1, boost_color);
+  draw_rect(boost_panel_x, boost_panel_y + boost_panel_h - 1, boost_panel_w, 1,
+            boost_color);
+  draw_rect(boost_panel_x, boost_panel_y, 1, boost_panel_h, boost_color);
+  draw_rect(boost_panel_x + boost_panel_w - 1, boost_panel_y, 1, boost_panel_h,
+            boost_color);
+  draw_text(boost_label_x, boost_label_y, "BOOST:", 1, WHITE);
+  draw_number(boost_number_x, boost_label_y, boost_seconds_left, 1, boost_color);
+  draw_rect(boost_bar_x, boost_bar_y, boost_bar_w, boost_bar_h, DARK_GRAY);
+  if (boost_fill_w > 0) {
+    draw_rect(boost_bar_x, boost_bar_y, boost_fill_w, boost_bar_h, boost_color);
+  }
 }
 
 // Draw a single tile at the specified column and row, with the top-left corner
@@ -2130,8 +2317,14 @@ void draw_tile(int col, int row, int screen_x, int screen_y) {
   if (tile == TILE_BUILDING) {
     draw_rect(screen_x + 4, screen_y + 4, TILE_SIZE - 8, TILE_SIZE - 8,
               DARK_GRAY);
-  } else if (tile == TILE_ROAD && cash_pickups[row][col]) {
-    draw_rect(screen_x + 13, screen_y + 13, 6, 6, YELLOW);
+  } else if (tile == TILE_ROAD) {
+    if (cash_pickups[row][col]) {
+      draw_rect(screen_x + 13, screen_y + 13, 6, 6, YELLOW);
+    }
+
+    if (speed_boost_pickups[row][col]) {
+      draw_rect(screen_x + 11, screen_y + 11, 10, 10, BLACK);
+    }
   }
 }
 
