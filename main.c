@@ -42,7 +42,8 @@
 #define SIREN_FALL_FRAMES 16
 #define SIREN_FREQ_LOW 860
 #define SIREN_FREQ_HIGH 1560
-#define SIREN_AMPLITUDE 0x06000000    /* keep below 0x07FFFFFF to avoid clip */
+#define SIREN_AMPLITUDE 0x07000000    /* keep below 0x07FFFFFF to avoid clip */
+#define SIREN_FADE_STEP 24
 
 #define BLACK 0x0000
 #define WHITE 0xFFFF
@@ -393,12 +394,12 @@ void update_siren(void) {
 
   for (n = 0; n < free_slots; n++) {
     if (siren_gain < target_gain) {
-      siren_gain += 4;
+      siren_gain += SIREN_FADE_STEP;
       if (siren_gain > target_gain) {
         siren_gain = target_gain;
       }
     } else if (siren_gain > target_gain) {
-      siren_gain -= 4;
+      siren_gain -= SIREN_FADE_STEP;
       if (siren_gain < target_gain) {
         siren_gain = target_gain;
       }
@@ -421,6 +422,9 @@ void update_siren(void) {
     if (siren_cycle_frame >= cycle_length) {
       siren_cycle_frame = 0;
     }
+  } else {
+    siren_phase_accum = 0;
+    siren_cycle_frame = 0;
   }
 }
 
